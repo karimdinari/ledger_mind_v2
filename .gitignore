@@ -9,3 +9,6 @@ sessions.db
 backend/sessions.db
 backend/app/agents/guidance/data/chroma/
 backend/app/agents/pedagogue/data/chroma/
+# Nested repo backups
+**/.git.bak*
+
