@@ -9,6 +9,9 @@ node_modules
 frontend/node_modules
 frontend/.output
 frontend/dist
+oldfront/node_modules
+oldfront/.output
+oldfront/dist
 **/.env
 !.env.example
 backend/.env

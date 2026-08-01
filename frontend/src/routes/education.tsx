@@ -1,17 +1,39 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { AppShell, PageHeader } from "@/components/lm/AppShell";
-import { isAuthed } from "@/lib/auth";
 import {
-  askEducationQuestion,
-  deleteEducationConversation,
-  fetchEducationConversation,
-  fetchEducationConversations,
-  fetchEducationRagStatus,
-  type EducationAskResult,
-  type EducationConversationSummary,
-  type EducationSource,
-} from "@/lib/api";
+  AlertTriangle,
+  Database,
+  ExternalLink,
+  MessageSquarePlus,
+  Radio,
+  Send,
+  Trash2,
+} from "lucide-react";
+import { AppShell, PageHeader } from "@/components/app-shell";
+import { ParcoursStrip, UpsellStrip } from "@/components/paywall";
+import {
+  Badge,
+  Button,
+  ButtonLink,
+  Card,
+  EmptyState,
+  ErrorBlock,
+  Field,
+  Input,
+  Spinner,
+  Textarea,
+  formatDate,
+} from "@/components/ui-kit";
+import { api, ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
+import type {
+  EducationAnswer,
+  EducationConversationSummary,
+  EducationMessage,
+  EducationSource,
+} from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/education")({
   head: () => ({
@@ -19,73 +41,108 @@ export const Route = createFileRoute("/education")({
       { title: "Éducation fiscale — LedgerMind" },
       {
         name: "description",
-        content: "Posez vos questions fiscales, réponses sourcées et alignées sur votre diagnostic.",
+        content:
+          "Posez vos questions de fiscalité française : micro-entreprise, TVA, seuils, charges. Réponses sourcées BOFiP — accessible sans compte.",
       },
       { property: "og:title", content: "Éducation fiscale — LedgerMind" },
+      {
+        property: "og:description",
+        content: "Assistant fiscal sourcé BOFiP, ouvert à tous sans inscription.",
+      },
     ],
   }),
   component: EducationPage,
 });
 
 const SUGGESTIONS = [
-  { tag: "Cadeaux", q: "Les cadeaux reçus comptent-ils dans mon CA micro ?" },
-  { tag: "Statut", q: "Micro-BNC ou micro-BIC : comment choisir ?" },
-  { tag: "TVA", q: "Quand dois-je facturer la TVA ?" },
-  { tag: "Début", q: "Que déclarer si je débute cette année ?" },
+  "Quels sont les seuils de la micro-entreprise en 2025 ?",
+  "Quand dois-je facturer la TVA en franchise en base ?",
+  "Quelle différence entre BIC et BNC pour un créateur de contenu ?",
+  "Quelles charges puis-je déduire au régime réel ?",
 ];
 
-type Turn = { question: string; result: EducationAskResult };
+const FOLLOWUPS = [
+  "Je n'ai pas compris, peux-tu reformuler ?",
+  "Peux-tu donner un exemple concret ?",
+  "Peux-tu expliquer plus simplement ?",
+];
+
+interface Turn {
+  role: "user" | "assistant";
+  content: string;
+  data?: EducationAnswer;
+}
 
 function EducationPage() {
-  const navigate = useNavigate();
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const { user } = useAuth();
+  const [turns, setTurns] = useState<Turn[]>([]);
   const [question, setQuestion] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [history, setHistory] = useState<Turn[]>([]);
-  const [corpusChunks, setCorpusChunks] = useState<number | null>(null);
+  const [concerne, setConcerne] = useState("");
+  const [showConcerne, setShowConcerne] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
-  const [conversations, setConversations] = useState<EducationConversationSummary[]>([]);
   const [regimeHint, setRegimeHint] = useState<string | null>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const qc = useQueryClient();
 
-  async function refreshConversations() {
-    try {
-      setConversations(await fetchEducationConversations());
-    } catch {
-      /* ignore */
-    }
+  const status = useQuery({
+    queryKey: ["rag-status"],
+    queryFn: () => api.ragStatus(),
+    retry: false,
+  });
+
+  const conversations = useQuery({
+    queryKey: ["education-conversations"],
+    queryFn: () => api.conversations(),
+    enabled: !!user,
+    retry: false,
+  });
+
+  const ask = useMutation({
+    mutationFn: (q: string) => {
+      const historique: EducationMessage[] = turns.map((t) => ({ role: t.role, content: t.content }));
+      return api.ask({
+        question: q,
+        concerne: concerne.trim() || undefined,
+        historique,
+        conversation_id: user ? conversationId : null,
+        use_guidance_context: !!user,
+      });
+    },
+    onSuccess: (data) => {
+      if (data.conversation_id) setConversationId(data.conversation_id);
+      if (data.regime_verdict) setRegimeHint(data.regime_verdict);
+      setTurns((t) => [...t, { role: "assistant", content: data.answer, data }]);
+      if (user) void qc.invalidateQueries({ queryKey: ["education-conversations"] });
+    },
+  });
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [turns.length, ask.isPending]);
+
+  function submit(raw: string) {
+    const q = raw.trim();
+    if (q.length < 3 || q.length > 2000 || ask.isPending) return;
+    setTurns((t) => [...t, { role: "user", content: q }]);
+    setQuestion("");
+    ask.mutate(q);
   }
 
-  useEffect(() => {
-    if (!isAuthed()) {
-      navigate({ to: "/auth", replace: true });
-      return;
-    }
-    fetchEducationRagStatus()
-      .then((s) => setCorpusChunks(s.corpus_chunks))
-      .catch(() => {});
-    refreshConversations();
-  }, [navigate]);
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [history, loading]);
-
   async function loadConversation(id: string) {
-    setError(null);
     try {
-      const row = await fetchEducationConversation(id);
+      const row = await api.conversation(id);
       setConversationId(row.id);
-      const turns: Turn[] = [];
-      const msgs = row.messages || [];
-      for (let i = 0; i < msgs.length; i++) {
-        if (msgs[i].role === "user") {
-          const asst = msgs[i + 1]?.role === "assistant" ? msgs[i + 1] : null;
-          turns.push({
-            question: msgs[i].content,
-            result: {
-              answer: asst?.content || "",
-              sources: (asst?.sources as EducationSource[]) || [],
+      const next: Turn[] = [];
+      for (const m of row.messages || []) {
+        if (m.role === "user") {
+          next.push({ role: "user", content: m.content });
+        } else if (m.role === "assistant") {
+          next.push({
+            role: "assistant",
+            content: m.content,
+            data: {
+              answer: m.content,
+              sources: m.sources || [],
               freshness_warning: false,
               corpus_empty: false,
               bofip_live_used: false,
@@ -94,350 +151,371 @@ function EducationPage() {
           });
         }
       }
-      setHistory(turns);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Impossible de charger la conversation");
-    }
-  }
-
-  async function submit(q: string) {
-    const trimmed = q.trim();
-    if (!trimmed || loading) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const historique = history.flatMap((t) => [
-        { role: "user", content: t.question },
-        { role: "assistant", content: t.result.answer },
-      ]);
-      const result = await askEducationQuestion(trimmed, historique, {
-        conversationId,
-      });
-      if (result.conversation_id) setConversationId(result.conversation_id);
-      if (result.regime_verdict) setRegimeHint(result.regime_verdict);
-      setHistory((prev) => [...prev, { question: trimmed, result }]);
-      setQuestion("");
-      await refreshConversations();
+      setTurns(next);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur lors de la question.");
-    } finally {
-      setLoading(false);
+      console.error(err);
     }
-  }
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    submit(question);
   }
 
   function newConversation() {
-    setHistory([]);
     setConversationId(null);
-    setError(null);
+    setTurns([]);
     setRegimeHint(null);
   }
 
-  async function removeConversation(id: string) {
-    try {
-      await deleteEducationConversation(id);
-      if (conversationId === id) newConversation();
-      await refreshConversations();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Suppression impossible");
-    }
-  }
+  const tooShort = question.trim().length > 0 && question.trim().length < 3;
 
   return (
     <AppShell>
       <PageHeader
-        eyebrow="Éducation"
-        title={
-          <>
-            Posez vos questions, <span className="italic font-normal">réponses sourcées.</span>
-          </>
+        eyebrow="Ouvert à tous · sans compte"
+        title="Éducation fiscale"
+        description="Interrogez la doctrine fiscale française. Chaque réponse cite ses sources et signale les textes obsolètes — pas besoin de vous connecter."
+        actions={
+          status.data ? (
+            <Badge tone={status.data.corpus_chunks > 0 ? "success" : "warning"}>
+              <Database className="size-3" /> {status.data.corpus_chunks} extraits indexés
+            </Badge>
+          ) : undefined
         }
-        description="Assistant pédagogique fiscal (RAG). Si vous avez un diagnostic guidance, les réponses s'alignent sur le verdict déterministe de régime."
       />
 
-      {corpusChunks === 0 && (
-        <div className="mb-8 bg-amber-fiscal/10 border border-amber-fiscal/30 rounded-2xl p-6 text-sm text-amber-fiscal font-medium">
-          Le corpus documentaire est vide. Lancez{" "}
-          <code className="font-mono text-xs bg-background/60 px-1.5 py-0.5 rounded">
-            python -m scripts.seed_pedagogue_corpus
-          </code>{" "}
-          depuis le dossier backend, puis rechargez cette page.
-        </div>
-      )}
-
-      {regimeHint && (
-        <div className="mb-6 text-xs font-mono uppercase tracking-widest text-teal-dark">
-          Aligné sur votre verdict guidance : {regimeHint}
-        </div>
-      )}
-
-      <div className="grid lg:grid-cols-12 gap-10 items-start">
-        <aside className="lg:col-span-3 space-y-4">
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="font-mono text-[11px] uppercase tracking-[0.25em] text-teal-dark">
-              Historique
-            </h3>
-            <button
-              type="button"
-              onClick={newConversation}
-              className="text-[11px] font-mono uppercase tracking-widest text-ink/40 hover:text-ink"
-            >
-              Nouveau
-            </button>
-          </div>
-          <ul className="space-y-2 max-h-96 overflow-y-auto">
-            {conversations.length === 0 && (
-              <li className="text-sm text-ink/40">Aucune conversation sauvegardée</li>
+      <div
+        className={cn(
+          "grid gap-6",
+          user ? "lg:grid-cols-[240px_minmax(0,1fr)_300px]" : "lg:grid-cols-[minmax(0,1fr)_300px]",
+        )}
+      >
+        {user && (
+          <aside className="space-y-3">
+            <Button variant="outline" size="sm" className="w-full" onClick={newConversation}>
+              <MessageSquarePlus className="size-3.5" /> Nouvelle conversation
+            </Button>
+            {conversations.isError && (
+              <ErrorBlock
+                message="Historique indisponible."
+                onRetry={() => void conversations.refetch()}
+              />
             )}
-            {conversations.map((c) => (
-              <li key={c.id} className="group flex items-start gap-2">
-                <button
-                  type="button"
-                  onClick={() => loadConversation(c.id)}
-                  className={`flex-1 text-left text-sm px-3 py-2 rounded-xl border transition-colors ${
-                    conversationId === c.id
-                      ? "border-teal-dark bg-teal-dark/5"
-                      : "border-border hover:border-ink"
-                  }`}
-                >
-                  <span className="line-clamp-2 font-medium">{c.title}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => removeConversation(c.id)}
-                  className="opacity-0 group-hover:opacity-100 text-xs text-coral px-1"
-                  aria-label="Supprimer"
-                >
-                  ×
-                </button>
-              </li>
-            ))}
-          </ul>
-        </aside>
-
-        <div className="lg:col-span-6 space-y-6">
-          <section className="bg-white border border-border rounded-2xl overflow-hidden animate-slide-up">
-            <div className="px-8 py-5 border-b border-border flex items-center justify-between gap-4">
-              <div>
-                <h2 className="text-lg font-semibold">Conversation</h2>
-                <p className="text-xs text-ink/40 mt-0.5">
-                  {history.length === 0
-                    ? "Aucune question pour l’instant"
-                    : `${history.length} échange${history.length > 1 ? "s" : ""}`}
-                </p>
-              </div>
-            </div>
-
-            <div className="px-8 py-8 min-h-80 max-h-112 overflow-y-auto space-y-8">
-              {history.length === 0 && !loading ? (
-                <EmptyState onPick={submit} disabled={loading} />
-              ) : (
-                history.map((turn, idx) => (
-                  <TurnBlock key={idx} index={idx + 1} turn={turn} />
-                ))
-              )}
-
-              {loading && (
-                <div className="flex items-center gap-4 text-ink/50">
-                  <div className="inline-block size-6 border-[3px] border-ink/20 border-t-teal-dark rounded-full animate-spin shrink-0" />
-                  <p className="text-sm">Recherche dans le corpus et rédaction de la réponse…</p>
-                </div>
-              )}
-              <div ref={bottomRef} />
-            </div>
-          </section>
-
-          {error && (
-            <div className="bg-coral/10 border border-coral/30 rounded-2xl p-6 text-sm text-coral font-medium">
-              {error}
-            </div>
-          )}
-
-            {history.length > 0 && !loading && (
-              <div className="flex flex-wrap gap-2 px-8 pb-4">
-                {[
-                  "Je n'ai pas compris, peux-tu reformuler ?",
-                  "Peux-tu donner un exemple concret ?",
-                  "Peux-tu expliquer plus simplement ?",
-                ].map((label) => (
-                  <button
-                    key={label}
-                    type="button"
-                    onClick={() => submit(label)}
-                    className="rounded-full border border-border px-3 py-1.5 text-xs text-ink/60 hover:border-ink hover:text-ink transition-colors"
+            {conversations.data?.length === 0 && (
+              <p className="text-xs text-muted-foreground">Aucune conversation enregistrée.</p>
+            )}
+            <ul className="space-y-1">
+              {conversations.data?.map((c: EducationConversationSummary) => (
+                <li key={c.id}>
+                  <div
+                    className={cn(
+                      "group flex items-start gap-1 rounded-xl border px-3 py-2 text-left text-sm transition-colors",
+                      conversationId === c.id
+                        ? "border-accent bg-accent/10"
+                        : "border-border hover:bg-secondary",
+                    )}
                   >
-                    {label}
+                    <button
+                      type="button"
+                      className="min-w-0 flex-1 text-left"
+                      onClick={() => void loadConversation(c.id)}
+                    >
+                      <p className="truncate font-medium">{c.title || "Sans titre"}</p>
+                      <p className="text-[11px] text-muted-foreground">{formatDate(c.updated_at)}</p>
+                    </button>
+                    <button
+                      type="button"
+                      className="opacity-0 transition-opacity group-hover:opacity-100"
+                      aria-label="Supprimer"
+                      onClick={async () => {
+                        await api.deleteConversation(c.id);
+                        if (conversationId === c.id) newConversation();
+                        void qc.invalidateQueries({ queryKey: ["education-conversations"] });
+                      }}
+                    >
+                      <Trash2 className="size-3.5 text-muted-foreground" />
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </aside>
+        )}
+
+        <div className="space-y-4">
+          {turns.length === 0 && !ask.isPending && (
+            <Card className="animate-rise surface-grain p-8">
+              <h2 className="text-2xl">Par quoi commencer ?</h2>
+              <p className="mt-2 max-w-lg text-sm text-muted-foreground">
+                Décrivez votre situation en une phrase. Plus le contexte est précis (activité, chiffre
+                d'affaires, année), plus la réponse est utile.
+              </p>
+              <div className="mt-6 grid gap-2 sm:grid-cols-2">
+                {SUGGESTIONS.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => submit(s)}
+                    className="rounded-xl border border-border bg-card p-4 text-left text-sm transition-all hover:-translate-y-0.5 hover:border-accent hover:shadow-soft"
+                  >
+                    {s}
                   </button>
                 ))}
               </div>
-            )}
+            </Card>
+          )}
 
-          <form
-            onSubmit={handleSubmit}
-            className="bg-white border border-border rounded-2xl p-8 space-y-5"
-          >
-            <div>
-              <label className="text-xs uppercase tracking-widest text-ink/50 font-semibold">
-                Votre question
-              </label>
-              <input
-                type="text"
-                value={question}
-                onChange={(e) => setQuestion(e.target.value)}
-                placeholder="Ex. Les cadeaux reçus comptent-ils dans mon CA ?"
-                className="w-full mt-2 px-0 py-3 bg-transparent border-b border-border text-lg focus:outline-none focus:border-ink transition-colors"
-                disabled={loading}
-              />
+          {turns.map((t, i) =>
+            t.role === "user" ? (
+              <div key={i} className="flex justify-end">
+                <p className="animate-rise max-w-[85%] rounded-2xl rounded-br-md bg-primary px-5 py-3 text-sm text-primary-foreground">
+                  {t.content}
+                </p>
+              </div>
+            ) : (
+              <AnswerCard key={i} answer={t.data!} />
+            ),
+          )}
+
+          {ask.isPending && (
+            <Card className="flex items-center gap-3 p-6 text-sm text-muted-foreground">
+              <Spinner /> LedgerMind consulte la doctrine fiscale…
+            </Card>
+          )}
+
+          {ask.isError && (
+            <ErrorBlock
+              message={
+                ask.error instanceof ApiError
+                  ? ask.error.message
+                  : "La réponse n'a pas pu être générée."
+              }
+              onRetry={() => {
+                const last = [...turns].reverse().find((t) => t.role === "user");
+                if (last) ask.mutate(last.content);
+              }}
+            />
+          )}
+
+          {turns.some((t) => t.role === "assistant") && !ask.isPending && (
+            <div className="flex flex-wrap gap-2">
+              {FOLLOWUPS.map((label) => (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={() => submit(label)}
+                  className="rounded-full border border-border bg-secondary/60 px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-accent/40 hover:text-foreground"
+                >
+                  {label}
+                </button>
+              ))}
             </div>
-            <button
-              type="submit"
-              disabled={loading || !question.trim()}
-              className="px-8 py-4 bg-ink text-background rounded-xl font-semibold hover:bg-teal-dark transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          )}
+
+          <div ref={bottomRef} />
+
+          <Card className="sticky bottom-24 z-20 space-y-3 p-4 lg:bottom-6">
+            {showConcerne && (
+              <Field label="Ce que ça concerne (optionnel)" htmlFor="concerne">
+                <Input
+                  id="concerne"
+                  value={concerne}
+                  onChange={(e) => setConcerne(e.target.value)}
+                  placeholder="Ex. micro-BNC, création 2025, prestations à l'étranger"
+                  maxLength={200}
+                />
+              </Field>
+            )}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                submit(question);
+              }}
+              className="space-y-3"
             >
-              {loading ? "Recherche en cours…" : "Poser la question"}
-            </button>
-          </form>
+              <Textarea
+                rows={3}
+                value={question}
+                maxLength={2000}
+                onChange={(e) => setQuestion(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(question);
+                }}
+                placeholder="Votre question fiscale…"
+                aria-label="Votre question fiscale"
+              />
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowConcerne((v) => !v)}
+                    className="rounded-full border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    {concerne ? `Contexte : ${concerne.slice(0, 24)}` : "+ Ajouter un contexte"}
+                  </button>
+                  <span
+                    className={cn(
+                      "font-mono text-xs",
+                      tooShort ? "text-destructive" : "text-muted-foreground",
+                    )}
+                  >
+                    {question.trim().length}/2000
+                  </span>
+                </div>
+                <Button
+                  type="submit"
+                  variant="safran"
+                  disabled={ask.isPending || question.trim().length < 3}
+                >
+                  {ask.isPending ? <Spinner /> : <Send />} Demander
+                </Button>
+              </div>
+            </form>
+          </Card>
         </div>
 
-        <aside className="lg:col-span-3 lg:sticky lg:top-24 space-y-6">
-          <h3 className="font-mono text-[11px] uppercase tracking-[0.25em] text-teal-dark">
-            Suggestions
-          </h3>
-          <div className="space-y-3">
-            {SUGGESTIONS.map((s) => (
-              <button
-                key={s.q}
-                type="button"
-                onClick={() => submit(s.q)}
-                disabled={loading}
-                className="w-full text-left bg-white border border-border rounded-2xl p-5 hover:border-ink transition-colors disabled:opacity-50 group"
-              >
-                <p className="font-mono text-[10px] uppercase tracking-widest text-teal-dark mb-2">
-                  {s.tag}
-                </p>
-                <p className="text-sm font-medium leading-snug group-hover:text-teal-dark transition-colors">
-                  {s.q}
-                </p>
-              </button>
-            ))}
-          </div>
-
-          <div className="bg-white border border-border rounded-2xl p-6 space-y-3">
-            <p className="font-mono text-[10px] uppercase tracking-widest text-ink/40">Corpus</p>
-            {corpusChunks == null ? (
-              <p className="text-sm text-ink/40">Chargement…</p>
-            ) : corpusChunks > 0 ? (
-              <>
-                <p className="text-2xl font-extrabold tracking-tighter text-teal-dark">
-                  {corpusChunks}
-                </p>
-                <p className="text-sm text-ink/50">extraits indexés · sources officielles</p>
-              </>
-            ) : (
-              <p className="text-sm text-amber-fiscal">Aucun extrait indexé</p>
-            )}
-          </div>
+        <aside className="space-y-4 lg:sticky lg:top-8 lg:self-start">
+          {user ? (
+            <>
+              <UpsellStrip text="Après la réponse, passez à l'action avec votre feuille de route personnalisée." />
+              <ParcoursStrip text="Complétez votre parcours fiscal pour débloquer le tableau de bord, la capture et les cabinets." />
+            </>
+          ) : (
+            <Card className="p-5">
+              <p className="rule-label text-muted-foreground">Agent pédagogique complet</p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                RAG, sources BOFiP et contrôle de fraîcheur — le même agent, sans créer de compte.
+              </p>
+              <p className="mt-3 text-xs text-muted-foreground">
+                Un compte permet seulement de sauvegarder l'historique et d'accéder au parcours Premium.
+              </p>
+              <ButtonLink to="/auth" variant="outline" size="sm" className="mt-4 w-full">
+                Sauvegarder mon historique
+              </ButtonLink>
+            </Card>
+          )}
+          {regimeHint && (
+            <Card className="p-5">
+              <p className="rule-label text-muted-foreground">Aligné sur votre diagnostic</p>
+              <p className="mt-2 text-sm font-medium">{regimeHint}</p>
+            </Card>
+          )}
+          <Card className="p-5">
+            <h2 className="text-lg">Comment lire les réponses</h2>
+            <ul className="mt-4 space-y-3 text-sm text-muted-foreground">
+              <li className="flex gap-2">
+                <Badge tone="info" className="shrink-0">
+                  Source
+                </Badge>
+                Chaque extrait renvoie au texte officiel consulté.
+              </li>
+              <li className="flex gap-2">
+                <Badge tone="warning" className="shrink-0">
+                  Périmé
+                </Badge>
+                Le texte cité a été remplacé — vérifiez l'année.
+              </li>
+              <li className="flex gap-2">
+                <Badge tone="accent" className="shrink-0">
+                  BOFiP live
+                </Badge>
+                La réponse a interrogé le BOFiP en direct.
+              </li>
+            </ul>
+          </Card>
+          {status.data?.corpus_chunks === 0 && (
+            <EmptyState
+              title="Corpus local vide"
+              description="Les réponses s'appuieront sur le BOFiP live. Pour un corpus local, lancez le script d'ingestion côté backend."
+            />
+          )}
+          {status.isError && (
+            <ErrorBlock
+              message="Statut du corpus indisponible."
+              onRetry={() => void status.refetch()}
+            />
+          )}
+          {user && (
+            <p className="px-1 text-xs text-muted-foreground">
+              Voir aussi l'
+              <Link to="/historique" className="underline decoration-accent underline-offset-4">
+                historique
+              </Link>{" "}
+              de vos parcours.
+            </p>
+          )}
         </aside>
       </div>
     </AppShell>
   );
 }
 
-function EmptyState({
-  onPick,
-  disabled,
-}: {
-  onPick: (q: string) => void;
-  disabled: boolean;
-}) {
+function AnswerCard({ answer }: { answer: EducationAnswer }) {
   return (
-    <div className="text-center py-6 space-y-6">
-      <div className="mx-auto size-14 rounded-full bg-teal-dark/10 grid place-items-center">
-        <span className="text-teal-dark text-xl font-semibold">?</span>
+    <Card className="animate-rise overflow-hidden">
+      <div className="space-y-4 p-6">
+        <div className="flex flex-wrap gap-2">
+          {answer.bofip_live_used && (
+            <Badge tone="accent">
+              <Radio className="size-3" /> BOFiP consulté en direct
+            </Badge>
+          )}
+          {answer.corpus_empty && (
+            <Badge tone="warning">
+              <Database className="size-3" /> Corpus local vide
+            </Badge>
+          )}
+        </div>
+
+        {answer.freshness_warning && (
+          <p className="flex gap-2 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm text-warning-foreground">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+            Certains textes cités peuvent être obsolètes — vérifiez la date de publication.
+          </p>
+        )}
+
+        <div className="whitespace-pre-wrap text-[15px] leading-relaxed text-foreground">
+          {answer.answer}
+        </div>
       </div>
-      <div>
-        <p className="font-semibold text-lg">Par où commencer ?</p>
-        <p className="text-sm text-ink/50 mt-2 max-w-sm mx-auto leading-relaxed">
-          Choisissez une suggestion, ou tapez votre question ci-dessous.
-        </p>
-      </div>
-      <div className="flex flex-wrap justify-center gap-2">
-        {SUGGESTIONS.slice(0, 2).map((s) => (
-          <button
-            key={s.q}
-            type="button"
-            disabled={disabled}
-            onClick={() => onPick(s.q)}
-            className="px-4 py-2 text-xs border border-border rounded-full hover:border-ink transition-colors disabled:opacity-50"
-          >
-            {s.tag}
-          </button>
-        ))}
-      </div>
-    </div>
+
+      {!!answer.sources?.length && (
+        <div className="border-t border-border bg-secondary/40 p-5">
+          <p className="rule-label mb-3 text-muted-foreground">
+            {answer.sources.length} source{answer.sources.length > 1 ? "s" : ""}
+          </p>
+          <ul className="space-y-2">
+            {answer.sources.map((s, i) => (
+              <SourceRow key={i} source={s} />
+            ))}
+          </ul>
+        </div>
+      )}
+    </Card>
   );
 }
 
-function TurnBlock({ index, turn }: { index: number; turn: Turn }) {
+function SourceRow({ source }: { source: EducationSource }) {
+  const label = source.titre || source.source || "Source";
   return (
-    <article className="space-y-4 animate-slide-up">
-      <div className="flex gap-4 items-start">
-        <div className="shrink-0 size-9 rounded-full bg-background border border-border font-mono grid place-items-center text-xs font-medium text-ink/50">
-          {String(index).padStart(2, "0")}
-        </div>
-        <div className="min-w-0 pt-1.5">
-          <p className="font-semibold leading-snug">{turn.question}</p>
-        </div>
-      </div>
-      <div className="pl-13 space-y-4">
-        <p className="text-sm text-ink/80 leading-relaxed whitespace-pre-wrap text-pretty">
-          {turn.result.answer}
-        </p>
-        {turn.result.freshness_warning && (
-          <p className="text-xs text-amber-fiscal font-medium">
-            Certaines sources peuvent être périmées — vérifiez la date de publication.
-          </p>
-        )}
-        {turn.result.sources.length > 0 && <SourceList sources={turn.result.sources} />}
-        {turn.result.bofip_live_used && (
-          <p className="text-[10px] font-mono uppercase tracking-widest text-ink/30">
-            Complété via BOFiP (live)
-          </p>
-        )}
-      </div>
-    </article>
-  );
-}
-
-function SourceList({ sources }: { sources: EducationSource[] }) {
-  return (
-    <div className="space-y-2">
-      <p className="text-[10px] font-mono uppercase tracking-widest text-ink/40">Sources</p>
-      <ul className="flex flex-wrap gap-2">
-        {sources.map((s, i) => {
-          const label = [s.source, s.titre].filter(Boolean).join(" — ");
-          const inner = (
-            <span className="inline-flex items-center px-3 py-1.5 bg-background border border-border rounded-full text-xs text-ink/60 hover:border-teal-dark hover:text-teal-dark transition-colors max-w-full truncate">
-              {label || "Source"}
-            </span>
-          );
-          return (
-            <li key={`${s.url}-${i}`} className="max-w-full">
-              {s.url ? (
-                <a href={s.url} target="_blank" rel="noreferrer">
-                  {inner}
-                </a>
-              ) : (
-                inner
-              )}
-            </li>
-          );
-        })}
-      </ul>
-    </div>
+    <li className="flex flex-wrap items-center gap-2 text-sm">
+      {source.url ? (
+        <a
+          href={source.url}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="inline-flex items-center gap-1.5 font-medium text-foreground underline decoration-accent underline-offset-4"
+        >
+          {label} <ExternalLink className="size-3.5" />
+        </a>
+      ) : (
+        <span className="font-medium">{label}</span>
+      )}
+      {source.date_publication && (
+        <span className="text-xs text-muted-foreground">{formatDate(source.date_publication)}</span>
+      )}
+      {source.perime && <Badge tone="warning">Périmé</Badge>}
+      {typeof source.score === "number" && (
+        <span className="font-mono text-xs text-muted-foreground">
+          pertinence {(source.score * 100).toFixed(0)}%
+        </span>
+      )}
+    </li>
   );
 }

@@ -1,554 +1,428 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { AppShell, PageHeader } from "@/components/lm/AppShell";
-import { isAuthed } from "@/lib/auth";
+import { createFileRoute } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+import { Send } from "lucide-react";
+import { AppShell, PageHeader } from "@/components/app-shell";
+import { PremiumGate } from "@/components/paywall";
 import {
-  analyzeCapture,
-  answerCapture,
-  askCaptureQuestion,
-  fetchCaptureInvoices,
-  fetchCaptureVirements,
-  formatMoney,
-  type CaptureAnalyzeResult,
-  type CaptureInvoice,
-  type CaptureInvoiceItem,
-  type CaptureTransfer,
-  type CaptureVirementItem,
-} from "@/lib/api";
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  ErrorBlock,
+  Input,
+  LoadingBlock,
+  Money,
+  Spinner,
+  formatDate,
+} from "@/components/ui-kit";
+import { UploadCard } from "@/components/orchestrator";
+import { api, ApiError } from "@/lib/api";
+import { DEMO_INVOICE } from "@/lib/demo";
+import { cn } from "@/lib/utils";
+import type {
+  BankTransfer,
+  CapturePending,
+  CaptureResult,
+  Invoice,
+  InvoiceListItem,
+  VirementListItem,
+} from "@/lib/types";
 
 export const Route = createFileRoute("/capture")({
   head: () => ({
     meta: [
-      { title: "Documents — LedgerMind" },
-      { name: "description", content: "Déposez vos factures, relevés et justificatifs." },
-      { property: "og:title", content: "Documents — LedgerMind" },
-      { property: "og:description", content: "Déposez vos factures, relevés et justificatifs." },
+      { title: "Capture de documents — LedgerMind" },
+      {
+        name: "description",
+        content:
+          "Analysez factures et virements : lignes détaillées, TVA, échéances, doublons et incohérences détectés automatiquement.",
+      },
+      { property: "og:title", content: "Capture de documents — LedgerMind" },
+      { property: "og:description", content: "Vos factures lues ligne à ligne." },
     ],
   }),
-  component: CapturePage,
+  component: Page,
 });
 
-const PIPELINE = [
-  "OCR",
-  "Langue",
-  "Extraction",
-  "Analyse",
-  "Classification",
-  "Doublon",
-  "Sauvegarde",
-];
-
-function pipelineStep(status: CaptureAnalyzeResult["status"] | null, idx: number): boolean {
-  if (!status) return false;
-  if (status === "erreur") return idx === 0;
-  if (status === "en_attente_utilisateur") return idx < 3;
-  return true;
+function Page() {
+  return (
+    <PremiumGate
+      feature="capture"
+      title="Capture intelligente"
+      pitch="Déposez une facture : LedgerMind en extrait chaque ligne et signale ce qui cloche."
+      benefits={[
+        "Lignes, TVA, échéances et catégorie de charge extraites",
+        "Doublons détectés avant enregistrement",
+        "Incohérences fiscales signalées (TVA facturée à tort, etc.)",
+        "Posez vos questions directement sur un document",
+      ]}
+      preview={<InvoicePreview invoice={DEMO_INVOICE} />}
+    >
+      <Capture />
+    </PremiumGate>
+  );
 }
 
-function CapturePage() {
-  const navigate = useNavigate();
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<CaptureAnalyzeResult | null>(null);
-  const [threadId, setThreadId] = useState<string | null>(null);
-  const [hitlAnswer, setHitlAnswer] = useState("");
-  const [activite, setActivite] = useState("");
-  const [invoices, setInvoices] = useState<CaptureInvoiceItem[]>([]);
-  const [virements, setVirements] = useState<CaptureVirementItem[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [selectedKind, setSelectedKind] = useState<"facture" | "virement">("facture");
-  const [qaQuestion, setQaQuestion] = useState("");
-  const [qaAnswer, setQaAnswer] = useState<string | null>(null);
-  const [qaLoading, setQaLoading] = useState(false);
+type ChatTurn = {
+  id: string;
+  role: "assistant" | "user";
+  content: string;
+  suggestions?: string[];
+};
 
-  async function refreshLists() {
-    const [inv, vir] = await Promise.all([
-      fetchCaptureInvoices().catch(() => [] as CaptureInvoiceItem[]),
-      fetchCaptureVirements().catch(() => [] as CaptureVirementItem[]),
-    ]);
-    setInvoices(inv);
-    setVirements(vir);
-  }
+function Capture() {
+  const [result, setResult] = useState<CaptureResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [draft, setDraft] = useState("");
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  const invoices = useQuery({ queryKey: ["invoices"], queryFn: () => api.invoices(), retry: false });
+  const virements = useQuery({ queryKey: ["virements"], queryFn: () => api.virements(), retry: false });
 
   useEffect(() => {
-    if (!isAuthed()) {
-      navigate({ to: "/auth", replace: true });
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [turns.length, busy]);
+
+  function pushAssistant(content: string, suggestions?: string[]) {
+    setTurns((prev) => [
+      ...prev,
+      {
+        id: `a-${Date.now()}-${prev.length}`,
+        role: "assistant",
+        content,
+        suggestions,
+      },
+    ]);
+  }
+
+  function pushUser(content: string) {
+    setTurns((prev) => [
+      ...prev,
+      { id: `u-${Date.now()}-${prev.length}`, role: "user", content },
+    ]);
+  }
+
+  function applyResult(res: CaptureResult, opts?: { skipPendingPrompt?: boolean }) {
+    setResult(res);
+    if (res.status === "erreur") {
+      pushAssistant(res.error || "Document illisible.");
       return;
     }
-    refreshLists();
-  }, [navigate]);
+    if (res.status === "en_attente_utilisateur" && res.pending && !opts?.skipPendingPrompt) {
+      const q =
+        res.pending.question ||
+        (res.pending.type === "doublon"
+          ? "Cette facture ressemble à un doublon. Dois-je l'enregistrer quand même ?"
+          : "Une précision est nécessaire pour continuer.");
+      pushAssistant(q, res.pending.suggestions ?? undefined);
+      return;
+    }
+    if (res.status === "completed") {
+      const kind = res.document_type === "virement" ? "virement" : "facture";
+      pushAssistant(
+        `Analyse terminée. Votre ${kind} est prête à gauche — posez-moi une question sur ce document si besoin.`,
+      );
+    }
+  }
 
-  async function handleFiles(files: FileList | null) {
-    if (!files?.length) return;
-    const file = files[0];
-    setLoading(true);
-    setError(null);
+  async function analyze(file: File) {
+    setBusy(true);
+    setTurns([]);
     setResult(null);
-    setQaAnswer(null);
+    setDraft("");
     try {
-      const res = await analyzeCapture(file, activite.trim() || undefined);
-      setResult(res);
-      setThreadId(res.thread_id);
-      if (res.document_id) {
-        setSelectedId(res.document_id);
-        setSelectedKind(res.document_type === "virement" ? "virement" : "facture");
-      }
-      if (res.status === "completed") await refreshLists();
-      if (res.status === "erreur") setError(res.error || "Erreur lors de l'analyse.");
+      pushAssistant(`Document reçu : « ${file.name} ». Lecture OCR et extraction en cours…`);
+      const res = await api.captureAnalyze(file);
+      applyResult(res);
+      void invoices.refetch();
+      void virements.refetch();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur inattendue.");
+      const msg = err instanceof ApiError ? err.message : "Analyse impossible.";
+      toast.error(msg);
+      pushAssistant(msg);
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   }
 
-  async function handleHitlSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!threadId || !hitlAnswer.trim()) return;
-    setLoading(true);
-    setError(null);
+  async function sendMessage(raw: string) {
+    const text = raw.trim();
+    if (!text || busy) return;
+
+    pushUser(text);
+    setDraft("");
+    setBusy(true);
+
     try {
-      const res = await answerCapture(threadId, hitlAnswer.trim());
-      if (res.analyze) {
-        setResult(res.analyze);
-        if (res.analyze.document_id) setSelectedId(res.analyze.document_id);
-        if (res.analyze.status === "completed") await refreshLists();
-        if (res.analyze.status === "erreur") {
-          setError(res.analyze.error || res.error || "Erreur.");
+      if (result?.status === "en_attente_utilisateur" && result.thread_id) {
+        const res = await api.captureAnswer({ thread_id: result.thread_id, answer: text });
+        applyResult(res);
+        if (res.status === "completed") {
+          void invoices.refetch();
+          void virements.refetch();
         }
-      } else if (res.answer) {
-        setQaAnswer(res.answer);
+        return;
       }
-      setHitlAnswer("");
+
+      const docId = result?.document_id;
+      if (!docId) {
+        pushAssistant("Déposez d'abord un document pour que je puisse répondre.");
+        return;
+      }
+
+      const res = await api.captureQa({ document_id: docId, question: text });
+      pushAssistant(res.answer ?? res.error ?? "Pas de réponse.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur inattendue.");
+      const msg = err instanceof ApiError ? err.message : "Envoi impossible.";
+      toast.error(msg);
+      pushAssistant(msg);
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   }
 
-  async function handleQa(e: React.FormEvent) {
-    e.preventDefault();
-    const docId = selectedId || result?.document_id;
-    if (!docId || !qaQuestion.trim()) return;
-    setQaLoading(true);
-    setQaAnswer(null);
-    try {
-      const res = await askCaptureQuestion(docId, qaQuestion.trim());
-      if (res.error) setError(res.error);
-      else setQaAnswer(res.answer ?? null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur Q&A.");
-    } finally {
-      setQaLoading(false);
-    }
-  }
-
-  const activeInvoice =
-    selectedKind === "facture"
-      ? invoices.find((i) => i.document_id === selectedId)
-      : undefined;
-  const activeVirement =
-    selectedKind === "virement"
-      ? virements.find((v) => v.document_id === selectedId)
-      : undefined;
+  const awaitingHitl = result?.status === "en_attente_utilisateur";
+  const chatReady = Boolean(result?.document_id) || awaitingHitl || turns.length > 0;
+  const placeholder = awaitingHitl
+    ? "Répondez à la question…"
+    : result?.document_id
+      ? "Ex. cette TVA est-elle correcte ?"
+      : "Déposez un document pour démarrer la conversation…";
 
   return (
     <AppShell>
       <PageHeader
-        eyebrow="Documents"
-        title={
-          <>
-            Déposez, on <span className="italic font-normal">s&apos;occupe du reste.</span>
-          </>
-        }
-        description="OCR → extraction complète → analyse → classification → détection de doublon → sauvegarde. Factures et virements."
+        eyebrow="Premium"
+        title="Capture de documents"
+        description="Factures, avoirs, virements : déposez, LedgerMind structure et contrôle."
       />
 
-      <div className="grid lg:grid-cols-12 gap-10 items-start">
-        <div className="lg:col-span-7 space-y-6">
-          <div className="bg-white border border-border rounded-2xl p-6 space-y-4">
-            <div>
-              <label className="text-xs uppercase tracking-widest text-ink/50 font-semibold">
-                Activité (optionnel)
-              </label>
-              <input
-                type="text"
-                value={activite}
-                onChange={(e) => setActivite(e.target.value)}
-                placeholder="ex. influenceur BNC, prestation freelance…"
-                className="w-full mt-2 px-0 py-3 bg-transparent border-b border-border text-base focus:outline-none focus:border-ink transition-colors"
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+        {/* -------- Colonne gauche : upload + champs extraits -------- */}
+        <div className="space-y-6">
+          <UploadCard
+            title="Déposer un document"
+            description="PDF ou image d'une facture, d'un avoir ou d'un avis de virement."
+            busy={busy && !result}
+            onFile={analyze}
+          />
+
+          {busy && !result && <LoadingBlock label="Lecture du document…" />}
+
+          {result?.status === "erreur" && (
+            <ErrorBlock message={result.error || "Document illisible."} />
+          )}
+
+          {result?.status === "en_attente_utilisateur" && result.pending?.type === "doublon" && (
+            <DuplicateCompare pending={result.pending} />
+          )}
+
+          {/* Afficher tous les champs dès qu'on a une facture (complété ou en attente) */}
+          {(result?.status === "completed" || result?.status === "en_attente_utilisateur") &&
+            (result.invoice || result.pending?.new_invoice) && (
+              <ExtractedInvoice
+                invoice={(result.invoice || result.pending?.new_invoice)!}
+                expenseCategory={result.expense_category}
+                analysis={result.analysis}
+                incoherences={result.incoherences ?? result.invoice?.incoherences}
+                paid={result.paid ?? result.invoice?.paid}
+                paymentDate={result.payment_date ?? result.invoice?.payment_date}
+                paymentDaysUntil={result.payment_days_until ?? result.invoice?.payment_days_until}
+                saved={result.saved}
+                duplicateSkipped={result.duplicate_skipped}
               />
-            </div>
-            <label className="block bg-background border border-dashed border-border hover:border-teal-dark transition-colors rounded-2xl p-12 text-center cursor-pointer">
-              <input
-                ref={fileRef}
-                type="file"
-                accept=".pdf,.png,.jpg,.jpeg,.webp"
-                className="sr-only"
-                disabled={loading}
-                onChange={(e) => handleFiles(e.target.files)}
-              />
-              <div className="mx-auto size-14 rounded-full bg-teal-dark/10 grid place-items-center mb-4">
-                <span className="text-2xl text-teal-dark">↑</span>
-              </div>
-              <p className="font-semibold text-lg">
-                {loading ? "Analyse en cours…" : "Glissez une facture ou un relevé"}
-              </p>
-              <p className="text-sm text-ink/50 mt-2">PDF ou image · 20 Mo max</p>
-            </label>
-          </div>
+            )}
 
-          {loading && (
-            <div className="bg-white border border-border rounded-2xl p-8 text-center">
-              <div className="inline-block size-8 border-[3px] border-ink/20 border-t-teal-dark rounded-full animate-spin" />
-              <p className="text-sm text-ink/50 mt-4">
-                OCR, extraction, analyse et classification… 30 à 90 secondes.
-              </p>
-            </div>
+          {result?.status === "completed" && result.transfer && (
+            <ExtractedTransfer
+              transfer={result.transfer}
+              analysis={result.analysis}
+              incoherences={result.incoherences}
+            />
           )}
 
-          {error && (
-            <div className="bg-coral/10 border border-coral/30 rounded-2xl p-6 text-sm text-coral font-medium">
-              {error}
-            </div>
-          )}
-
-          {result && (
-            <section className="bg-white border border-border rounded-2xl p-8 space-y-6 animate-slide-up">
-              <ResultHeader result={result} />
-
-              <div className="grid grid-cols-4 sm:grid-cols-7 gap-2">
-                {PIPELINE.map((step, i) => (
-                  <div key={step} className="space-y-2">
-                    <div
-                      className={`h-1.5 rounded-full ${
-                        pipelineStep(result.status, i) ? "bg-teal-light" : "bg-border"
-                      }`}
-                    />
-                    <span className="text-[9px] uppercase tracking-widest text-ink/40 font-semibold">
-                      {step}
-                    </span>
-                  </div>
-                ))}
-              </div>
-
-              {result.status === "en_attente_utilisateur" && result.pending && (
-                <HitlPanel
-                  pending={result.pending}
-                  hitlAnswer={hitlAnswer}
-                  setHitlAnswer={setHitlAnswer}
-                  onSubmit={handleHitlSubmit}
-                  loading={loading}
-                />
-              )}
-
-              {result.status === "completed" && result.invoice && (
-                <InvoiceReport
-                  invoice={result.invoice}
-                  expenseCategory={result.expense_category}
-                  analysis={result.analysis}
-                  incoherences={result.incoherences}
-                  paid={result.paid}
-                  paymentDate={result.payment_date}
-                  paymentDaysUntil={result.payment_days_until}
-                />
-              )}
-
-              {result.status === "completed" && result.transfer && (
-                <TransferReport
-                  transfer={result.transfer}
-                  analysis={result.analysis}
-                  incoherences={result.incoherences}
-                />
-              )}
-            </section>
-          )}
-
-          {(selectedId || result?.document_id) && selectedKind === "facture" && (
-            <section className="bg-white border border-border rounded-2xl p-8 space-y-4">
-              <h3 className="text-lg font-semibold">Question sur ce document</h3>
-              <p className="text-sm text-ink/50">
-                Ancré sur l&apos;OCR et l&apos;historique — ex. « Cette facture est-elle déductible ? »
-              </p>
-              <form onSubmit={handleQa} className="space-y-3">
-                <input
-                  type="text"
-                  value={qaQuestion}
-                  onChange={(e) => setQaQuestion(e.target.value)}
-                  placeholder="Votre question…"
-                  className="w-full px-0 py-3 bg-transparent border-b border-border text-base focus:outline-none focus:border-ink"
-                />
-                <button
-                  type="submit"
-                  disabled={qaLoading || !qaQuestion.trim()}
-                  className="px-8 py-4 bg-ink text-background rounded-xl font-semibold hover:bg-teal-dark transition-colors disabled:opacity-40"
-                >
-                  {qaLoading ? "Réponse…" : "Poser la question"}
-                </button>
-              </form>
-              {qaAnswer && (
-                <p className="text-sm text-ink/80 bg-background rounded-xl p-4 leading-relaxed whitespace-pre-wrap">
-                  {qaAnswer}
-                </p>
-              )}
-            </section>
-          )}
+          <HistoryLists
+            invoices={invoices.data}
+            virements={virements.data}
+            invoicesLoading={invoices.isLoading}
+            virementsLoading={virements.isLoading}
+            invoicesError={invoices.isError}
+            onRetryInvoices={() => void invoices.refetch()}
+            onSelectInvoice={(row) => {
+              setResult({
+                status: "completed",
+                document_id: row.document_id,
+                document_type: "facture",
+                invoice: row.invoice,
+                expense_category: row.expense_category,
+                analysis: row.analysis,
+                incoherences: row.incoherences,
+                paid: row.paid,
+                payment_date: row.payment_date,
+                payment_days_until: row.payment_days_until,
+              });
+              setTurns([
+                {
+                  id: `sel-${row.document_id}`,
+                  role: "assistant",
+                  content:
+                    "Facture sélectionnée. Posez-moi une question sur ce document (déductibilité, TVA, échéance…).",
+                },
+              ]);
+            }}
+            onSelectVirement={(row) => {
+              setResult({
+                status: "completed",
+                document_id: row.document_id,
+                document_type: "virement",
+                transfer: row.transfer,
+                analysis: row.analysis,
+                incoherences: row.incoherences,
+              });
+              setTurns([
+                {
+                  id: `sel-${row.document_id}`,
+                  role: "assistant",
+                  content: "Virement sélectionné. Posez-moi une question sur ce document.",
+                },
+              ]);
+            }}
+          />
         </div>
 
-        <aside className="lg:col-span-5 lg:sticky lg:top-24 space-y-8">
-          <SidebarList
-            title="Mes factures"
-            empty="Aucune facture analysée."
-            items={invoices.map((inv) => ({
-              id: inv.document_id,
-              title: inv.invoice.issuer_name ?? "Facture",
-              meta: `${inv.expense_category ?? "—"} · ${inv.invoice.issue_date ?? "date ?"}`,
-              amount:
-                inv.invoice.total_ttc != null
-                  ? `${formatMoney(inv.invoice.total_ttc)} €`
-                  : "—",
-            }))}
-            selectedId={selectedKind === "facture" ? selectedId : null}
-            onSelect={(id) => {
-              setSelectedId(id);
-              setSelectedKind("facture");
-              setQaAnswer(null);
-              setResult(null);
-            }}
-          />
-
-          <SidebarList
-            title="Mes virements"
-            empty="Aucun virement analysé."
-            items={virements.map((v) => ({
-              id: v.document_id,
-              title: v.transfer.beneficiary_name || v.transfer.sender_name || "Virement",
-              meta: `${v.transfer.direction ?? "—"} · ${v.transfer.execution_date ?? "date ?"}`,
-              amount:
-                v.transfer.amount != null
-                  ? `${formatMoney(v.transfer.amount)} ${v.transfer.currency ?? "€"}`
-                  : "—",
-            }))}
-            selectedId={selectedKind === "virement" ? selectedId : null}
-            onSelect={(id) => {
-              setSelectedId(id);
-              setSelectedKind("virement");
-              setQaAnswer(null);
-              setResult(null);
-            }}
-          />
-
-          {activeInvoice && !result && (
-            <div className="bg-white border border-border rounded-2xl p-6">
-              <InvoiceReport
-                invoice={activeInvoice.invoice}
-                expenseCategory={activeInvoice.expense_category}
-                analysis={activeInvoice.analysis}
-                incoherences={activeInvoice.incoherences}
-                paid={activeInvoice.paid}
-                paymentDate={activeInvoice.payment_date}
-                paymentDaysUntil={activeInvoice.payment_days_until}
-              />
+        {/* -------- Colonne droite : conversation -------- */}
+        <aside className="lg:sticky lg:top-8 lg:self-start">
+          <Card className="flex h-[min(70vh,720px)] flex-col overflow-hidden p-0">
+            <div className="border-b border-border px-5 py-4">
+              <p className="rule-label text-muted-foreground">Assistant document</p>
+              <h2 className="mt-1 text-lg font-semibold">Conversation</h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Validation et questions sur le document — fil continu à droite.
+              </p>
             </div>
-          )}
 
-          {activeVirement && !result && (
-            <div className="bg-white border border-border rounded-2xl p-6">
-              <TransferReport
-                transfer={activeVirement.transfer}
-                analysis={activeVirement.analysis}
-                incoherences={activeVirement.incoherences}
-              />
+            <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+              {!chatReady && (
+                <p className="px-2 py-8 text-center text-sm text-muted-foreground">
+                  Déposez un document pour démarrer la conversation.
+                </p>
+              )}
+              {turns.map((t) => (
+                <div
+                  key={t.id}
+                  className={cn("flex", t.role === "user" ? "justify-end" : "justify-start")}
+                >
+                  <div
+                    className={cn(
+                      "max-w-[90%] rounded-2xl px-4 py-3 text-sm leading-relaxed",
+                      t.role === "user"
+                        ? "rounded-br-md bg-primary text-primary-foreground"
+                        : "rounded-bl-md border border-border bg-secondary/50 text-foreground",
+                    )}
+                  >
+                    <p className="whitespace-pre-wrap">{t.content}</p>
+                    {!!t.suggestions?.length && t.role === "assistant" && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {t.suggestions.map((s) => (
+                          <button
+                            key={s}
+                            type="button"
+                            disabled={busy}
+                            onClick={() => void sendMessage(s)}
+                            className="rounded-full border border-border bg-card px-3 py-1 text-xs font-medium transition-colors hover:border-accent disabled:opacity-50"
+                          >
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {busy && (
+                <div className="flex items-center gap-2 px-2 text-xs text-muted-foreground">
+                  <Spinner className="size-3.5" /> LedgerMind répond…
+                </div>
+              )}
+              <div ref={chatEndRef} />
             </div>
-          )}
+
+            <form
+              className="border-t border-border p-3"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void sendMessage(draft);
+              }}
+            >
+              <div className="flex gap-2">
+                <Input
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  disabled={busy || (!awaitingHitl && !result?.document_id)}
+                  placeholder={placeholder}
+                  aria-label="Message"
+                />
+                <Button
+                  type="submit"
+                  variant="safran"
+                  size="icon"
+                  disabled={busy || !draft.trim() || (!awaitingHitl && !result?.document_id)}
+                  aria-label="Envoyer"
+                >
+                  {busy ? <Spinner /> : <Send />}
+                </Button>
+              </div>
+            </form>
+          </Card>
         </aside>
       </div>
     </AppShell>
   );
 }
 
-function ResultHeader({ result }: { result: CaptureAnalyzeResult }) {
-  const statusLabel =
-    result.status === "completed"
-      ? "Terminé"
-      : result.status === "en_attente_utilisateur"
-        ? "Action requise"
-        : "Erreur";
-  const statusClass =
-    result.status === "completed"
-      ? "text-teal-dark"
-      : result.status === "en_attente_utilisateur"
-        ? "text-amber-600"
-        : "text-coral";
+/* -------------------------------------------------------------------------- */
+/* Affichage complet des champs extraits                                      */
+/* -------------------------------------------------------------------------- */
 
-  return (
-    <div className="flex flex-wrap items-start justify-between gap-4">
-      <div>
-        <h2 className="text-lg font-semibold">Résultat d&apos;analyse</h2>
-        <p className="text-xs text-ink/40 font-mono mt-1">
-          {result.document_type === "virement" ? "Virement" : "Facture"}
-          {result.document_id ? ` · ${result.document_id.slice(0, 8)}…` : ""}
-        </p>
-      </div>
-      <div className="flex flex-wrap gap-2 justify-end">
-        <span className={`text-[10px] font-mono uppercase tracking-widest ${statusClass}`}>
-          {statusLabel}
-        </span>
-        {result.saved === true && (
-          <Badge tone="teal">Sauvegardée</Badge>
-        )}
-        {result.saved === false && result.duplicate_skipped && (
-          <Badge tone="amber">Doublon ignoré</Badge>
-        )}
-        {result.expense_category && (
-          <Badge tone="ink">{result.expense_category}</Badge>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function Badge({
-  children,
-  tone,
-}: {
-  children: ReactNode;
-  tone: "teal" | "amber" | "ink";
-}) {
-  const cls =
-    tone === "teal"
-      ? "bg-teal-dark/10 text-teal-dark border-teal-dark/20"
-      : tone === "amber"
-        ? "bg-amber-50 text-amber-700 border-amber-200"
-        : "bg-background text-ink/70 border-border";
-  return (
-    <span
-      className={`text-[10px] font-mono uppercase tracking-widest px-2.5 py-1 rounded-full border ${cls}`}
-    >
-      {children}
-    </span>
-  );
-}
-
-function HitlPanel({
-  pending,
-  hitlAnswer,
-  setHitlAnswer,
-  onSubmit,
-  loading,
-}: {
-  pending: NonNullable<CaptureAnalyzeResult["pending"]>;
-  hitlAnswer: string;
-  setHitlAnswer: (v: string) => void;
-  onSubmit: (e: React.FormEvent) => void;
-  loading: boolean;
-}) {
-  const isDup = pending.type === "doublon";
-  return (
-    <div className="border-t border-border pt-6 space-y-5">
-      <div>
-        <p className="font-mono text-[10px] uppercase tracking-widest text-amber-600 mb-2">
-          {isDup ? "Doublon possible" : "Champ manquant"}
-          {pending.field ? ` · ${pending.field}` : ""}
-        </p>
-        <p className="text-sm font-medium leading-relaxed">{pending.question}</p>
-      </div>
-
-      {isDup && (pending.existing_invoice || pending.new_invoice) && (
-        <div className="grid sm:grid-cols-2 gap-4">
-          <MiniInvoiceCard title="Existant" data={pending.existing_invoice} />
-          <MiniInvoiceCard title="Nouveau" data={pending.new_invoice} />
-        </div>
-      )}
-
-      {pending.suggestions && pending.suggestions.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {pending.suggestions.map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setHitlAnswer(s)}
-              className="px-3 py-1.5 text-xs border border-border rounded-lg hover:border-ink transition-colors"
-            >
-              {s}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {isDup && (
-        <div className="flex flex-wrap gap-2">
-          {["oui", "non"].map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setHitlAnswer(s)}
-              className="px-4 py-2 text-xs border border-border rounded-lg hover:border-ink transition-colors capitalize"
-            >
-              {s === "oui" ? "Oui — c’est un doublon" : "Non — enregistrer quand même"}
-            </button>
-          ))}
-        </div>
-      )}
-
-      <form onSubmit={onSubmit} className="space-y-3">
-        <input
-          type="text"
-          value={hitlAnswer}
-          onChange={(e) => setHitlAnswer(e.target.value)}
-          placeholder={isDup ? "oui / non" : "Votre réponse…"}
-          className="w-full px-0 py-3 bg-transparent border-b border-border text-base focus:outline-none focus:border-ink"
-        />
-        <button
-          type="submit"
-          disabled={loading || !hitlAnswer.trim()}
-          className="px-8 py-4 bg-ink text-background rounded-xl font-semibold hover:bg-teal-dark transition-colors disabled:opacity-40"
-        >
-          Valider
-        </button>
-      </form>
-    </div>
-  );
-}
-
-function MiniInvoiceCard({
-  title,
-  data,
-}: {
-  title: string;
-  data?: CaptureInvoice | Record<string, unknown> | null;
-}) {
-  if (!data) return null;
-  const inv = data as CaptureInvoice;
-  return (
-    <div className="bg-background border border-border rounded-xl p-4 space-y-2 text-sm">
-      <p className="font-mono text-[10px] uppercase tracking-widest text-ink/40">{title}</p>
-      <p className="font-semibold">{inv.issuer_name ?? "—"}</p>
-      <p className="font-mono text-xs text-ink/60">{inv.invoice_number ?? "—"}</p>
-      <p className="font-mono text-xs">
-        {inv.total_ttc != null ? `${formatMoney(inv.total_ttc)} ${inv.currency ?? "€"}` : "—"}
-      </p>
-      <p className="text-xs text-ink/50">{inv.issue_date ?? "—"}</p>
-    </div>
-  );
-}
+const INVOICE_EXCLUDE = new Set([
+  "invoice_number",
+  "issuer_name",
+  "issuer_tax_id",
+  "client_name",
+  "issue_date",
+  "due_date",
+  "payment_terms_days",
+  "subtotal_ht",
+  "vat_amount",
+  "total_ttc",
+  "currency",
+  "line_items",
+  "incoherences",
+  "saved",
+  "duplicate_skipped",
+  "paid",
+  "payment_date",
+  "payment_days_until",
+  "expense_category",
+]);
 
 function Field({
   label,
   value,
-  mono = false,
+  mono,
 }: {
   label: string;
-  value: ReactNode;
+  value: React.ReactNode;
   mono?: boolean;
 }) {
   const empty = value === null || value === undefined || value === "";
   return (
     <div>
-      <p className="text-xs uppercase tracking-widest text-ink/40 font-semibold mb-1">{label}</p>
-      <p className={`${mono ? "font-mono" : "font-medium"} text-sm break-words`}>
+      <p className="rule-label mb-1 text-muted-foreground">{label}</p>
+      <p className={cn("break-words text-sm font-medium", mono && "font-mono")}>
         {empty ? "—" : value}
       </p>
     </div>
@@ -557,10 +431,42 @@ function Field({
 
 function money(n: number | null | undefined, currency?: string | null) {
   if (n == null) return null;
-  return `${formatMoney(n)} ${currency ?? "€"}`;
+  return <Money value={n} currency={currency} />;
 }
 
-function InvoiceReport({
+function RemainingFields({
+  data,
+  exclude,
+}: {
+  data: Record<string, unknown>;
+  exclude: Set<string>;
+}) {
+  const entries = Object.entries(data).filter(([k, v]) => {
+    if (exclude.has(k)) return false;
+    if (v === null || v === undefined || v === "") return false;
+    if (Array.isArray(v) && v.length === 0) return false;
+    if (typeof v === "object" && !Array.isArray(v)) return false;
+    return true;
+  });
+  if (!entries.length) return null;
+  return (
+    <div>
+      <p className="rule-label mb-3 text-muted-foreground">Autres champs extraits</p>
+      <div className="grid gap-4 sm:grid-cols-2">
+        {entries.map(([k, v]) => (
+          <Field
+            key={k}
+            label={k.replace(/_/g, " ")}
+            value={typeof v === "boolean" ? (v ? "Oui" : "Non") : String(v)}
+            mono={typeof v === "number" || /id|iban|bic|number|date|siren|siret/i.test(k)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ExtractedInvoice({
   invoice,
   expenseCategory,
   analysis,
@@ -568,59 +474,71 @@ function InvoiceReport({
   paid,
   paymentDate,
   paymentDaysUntil,
+  saved,
+  duplicateSkipped,
 }: {
-  invoice: CaptureInvoice;
+  invoice: Invoice;
   expenseCategory?: string | null;
-  analysis?: string | null;
+  analysis?: string | Record<string, unknown> | null;
   incoherences?: string[] | null;
   paid?: boolean | null;
   paymentDate?: string | null;
   paymentDaysUntil?: number | null;
+  saved?: boolean | null;
+  duplicateSkipped?: boolean | null;
 }) {
   const lines = invoice.line_items ?? [];
   const paidLabel =
-    paid === true || invoice.paid === true
-      ? "Oui"
-      : paid === false || invoice.paid === false
-        ? "Non"
+    paid === true ? "Oui" : paid === false ? "Non" : null;
+  const analysisText =
+    typeof analysis === "string"
+      ? analysis
+      : analysis && typeof analysis === "object"
+        ? JSON.stringify(analysis, null, 2)
         : null;
 
   return (
-    <div className="space-y-8">
-      <div>
-        <p className="font-mono text-[10px] uppercase tracking-widest text-teal-dark mb-4">
-          Champs extraits
-        </p>
-        <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Émetteur" value={invoice.issuer_name} />
-          <Field label="N° facture" value={invoice.invoice_number} mono />
-          <Field label="Matricule fiscal / SIREN" value={invoice.issuer_tax_id} mono />
-          <Field label="Client" value={invoice.client_name} />
-          <Field label="Date d'émission" value={invoice.issue_date} mono />
-          <Field label="Échéance" value={invoice.due_date} mono />
-          <Field
-            label="Délai de paiement"
-            value={
-              invoice.payment_terms_days != null
-                ? `${invoice.payment_terms_days} jours`
-                : null
-            }
-          />
-          <Field label="Catégorie de dépense" value={expenseCategory} />
-          <Field label="Sous-total HT" value={money(invoice.subtotal_ht, invoice.currency)} mono />
-          <Field label="TVA" value={money(invoice.vat_amount, invoice.currency)} mono />
-          <Field label="Total TTC" value={money(invoice.total_ttc, invoice.currency)} mono />
-          <Field label="Devise" value={invoice.currency} mono />
+    <Card className="animate-rise space-y-8 overflow-hidden p-6 sm:p-8">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="rule-label text-accent-foreground">Champs extraits</p>
+          <h2 className="mt-2 text-2xl">{invoice.invoice_number || "Facture"}</h2>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {paid !== undefined && paid !== null && (
+            <Badge tone={paid ? "success" : "warning"}>{paid ? "Payée" : "En attente"}</Badge>
+          )}
+          {saved && <Badge tone="info">Enregistrée</Badge>}
+          {duplicateSkipped && <Badge tone="warning">Doublon ignoré</Badge>}
+          {expenseCategory && <Badge tone="neutral">{expenseCategory}</Badge>}
         </div>
       </div>
 
-      <div className="bg-background border border-border rounded-2xl p-5">
-        <p className="font-mono text-[10px] uppercase tracking-widest text-ink/40 mb-4">
-          Paiement
-        </p>
-        <div className="grid sm:grid-cols-3 gap-4">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="Émetteur" value={invoice.issuer_name} />
+        <Field label="N° facture" value={invoice.invoice_number} mono />
+        <Field label="Matricule fiscal / SIREN" value={invoice.issuer_tax_id} mono />
+        <Field label="Client" value={invoice.client_name} />
+        <Field label="Date d'émission" value={formatDate(invoice.issue_date)} mono />
+        <Field label="Échéance" value={formatDate(invoice.due_date)} mono />
+        <Field
+          label="Délai de paiement"
+          value={
+            invoice.payment_terms_days != null ? `${invoice.payment_terms_days} jours` : null
+          }
+        />
+        <Field label="Catégorie de dépense" value={expenseCategory || invoice.expense_category} />
+        <Field label="Sous-total HT" value={money(invoice.subtotal_ht, invoice.currency)} mono />
+        <Field label="TVA" value={money(invoice.vat_amount, invoice.currency)} mono />
+        <Field label="Total TTC" value={money(invoice.total_ttc, invoice.currency)} mono />
+        <Field label="Devise" value={invoice.currency} mono />
+      </div>
+
+      <div className="rounded-2xl border border-border bg-secondary/40 p-5">
+        <p className="rule-label mb-4 text-muted-foreground">Paiement</p>
+        <div className="grid gap-4 sm:grid-cols-3">
           <Field label="Payée" value={paidLabel} />
-          <Field label="Date d'échéance / paiement" value={paymentDate} mono />
+          <Field label="Date d'échéance / paiement" value={formatDate(paymentDate)} mono />
           <Field
             label="Jours restants"
             value={paymentDaysUntil != null ? String(paymentDaysUntil) : null}
@@ -631,31 +549,39 @@ function InvoiceReport({
 
       {lines.length > 0 && (
         <div>
-          <p className="font-mono text-[10px] uppercase tracking-widest text-ink/40 mb-3">
+          <p className="rule-label mb-3 text-muted-foreground">
             Lignes de facture ({lines.length})
           </p>
-          <div className="overflow-x-auto border border-border rounded-xl">
-            <table className="w-full text-sm min-w-[28rem]">
-              <thead className="bg-background">
-                <tr className="text-[10px] uppercase tracking-widest text-ink/40">
-                  <th className="text-left px-4 py-3 font-semibold">Description</th>
-                  <th className="text-right px-4 py-3 font-semibold">Qté</th>
-                  <th className="text-right px-4 py-3 font-semibold">P.U.</th>
-                  <th className="text-right px-4 py-3 font-semibold">Total</th>
+          <div className="overflow-x-auto rounded-xl border border-border">
+            <table className="w-full min-w-[28rem] text-sm">
+              <thead className="bg-secondary/50">
+                <tr className="text-left text-[10px] uppercase tracking-widest text-muted-foreground">
+                  <th className="px-4 py-3 font-semibold">Description</th>
+                  <th className="px-4 py-3 text-right font-semibold">Qté</th>
+                  <th className="px-4 py-3 text-right font-semibold">P.U.</th>
+                  <th className="px-4 py-3 text-right font-semibold">Total</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {lines.map((li, i) => (
                   <tr key={i}>
                     <td className="px-4 py-3">{li.description ?? "—"}</td>
-                    <td className="px-4 py-3 text-right font-mono text-ink/70">
+                    <td className="px-4 py-3 text-right font-mono text-muted-foreground">
                       {li.quantity ?? "—"}
                     </td>
-                    <td className="px-4 py-3 text-right font-mono text-ink/70">
-                      {li.unit_price != null ? formatMoney(li.unit_price) : "—"}
+                    <td className="px-4 py-3 text-right font-mono text-muted-foreground">
+                      {li.unit_price != null ? (
+                        <Money value={li.unit_price} currency={invoice.currency} />
+                      ) : (
+                        "—"
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
-                      {li.total != null ? formatMoney(li.total) : "—"}
+                      {li.total != null ? (
+                        <Money value={li.total} currency={invoice.currency} />
+                      ) : (
+                        "—"
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -665,27 +591,25 @@ function InvoiceReport({
         </div>
       )}
 
-      {analysis && (
+      <RemainingFields data={invoice as Record<string, unknown>} exclude={INVOICE_EXCLUDE} />
+
+      {analysisText && (
         <div>
-          <p className="font-mono text-[10px] uppercase tracking-widest text-ink/40 mb-2">
-            Analyse comptable
-          </p>
-          <p className="text-sm text-ink/80 leading-relaxed whitespace-pre-wrap text-pretty">
-            {analysis}
+          <p className="rule-label mb-2 text-muted-foreground">Analyse comptable</p>
+          <p className="whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">
+            {analysisText}
           </p>
         </div>
       )}
 
-      {incoherences && incoherences.length > 0 && (
+      {!!incoherences?.length && (
         <div>
-          <p className="font-mono text-[10px] uppercase tracking-widest text-amber-600 mb-3">
-            Incohérences détectées
-          </p>
+          <p className="rule-label mb-3 text-warning-foreground">Incohérences détectées</p>
           <ul className="space-y-2">
             {incoherences.map((inc, i) => (
               <li
                 key={i}
-                className="text-sm text-amber-800 bg-amber-50 border border-amber-100 px-4 py-3 rounded-xl"
+                className="rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm"
               >
                 {inc}
               </li>
@@ -693,110 +617,237 @@ function InvoiceReport({
           </ul>
         </div>
       )}
-    </div>
+    </Card>
   );
 }
 
-function TransferReport({
+const TRANSFER_KNOWN = [
+  "transfer_reference",
+  "execution_date",
+  "value_date",
+  "amount",
+  "currency",
+  "direction",
+  "sender_name",
+  "receiver_name",
+  "beneficiary_name",
+  "sender_iban",
+  "receiver_iban",
+  "beneficiary_iban",
+  "bic",
+  "beneficiary_bic",
+  "bank_name",
+  "motif",
+  "transfer_type",
+] as const;
+
+function ExtractedTransfer({
   transfer,
   analysis,
   incoherences,
 }: {
-  transfer: CaptureTransfer;
-  analysis?: string | null;
+  transfer: BankTransfer;
+  analysis?: string | Record<string, unknown> | null;
   incoherences?: string[] | null;
 }) {
+  const analysisText =
+    typeof analysis === "string"
+      ? analysis
+      : analysis && typeof analysis === "object"
+        ? JSON.stringify(analysis, null, 2)
+        : null;
+  const known = new Set<string>(TRANSFER_KNOWN);
+
   return (
-    <div className="space-y-8">
+    <Card className="animate-rise space-y-8 p-6 sm:p-8">
       <div>
-        <p className="font-mono text-[10px] uppercase tracking-widest text-teal-dark mb-4">
-          Champs extraits
-        </p>
-        <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Référence" value={transfer.transfer_reference} mono />
-          <Field label="Type" value={transfer.transfer_type} />
-          <Field label="Sens" value={transfer.direction} />
-          <Field label="Montant" value={money(transfer.amount ?? null, transfer.currency)} mono />
-          <Field label="Date d'exécution" value={transfer.execution_date} mono />
-          <Field label="Date de valeur" value={transfer.value_date} mono />
-          <Field label="Donneur d'ordre" value={transfer.sender_name} />
-          <Field label="IBAN émetteur" value={transfer.sender_iban} mono />
-          <Field label="Bénéficiaire" value={transfer.beneficiary_name} />
-          <Field label="IBAN bénéficiaire" value={transfer.beneficiary_iban} mono />
-          <Field label="BIC / SWIFT" value={transfer.beneficiary_bic} mono />
-          <Field label="Banque" value={transfer.bank_name} />
-          <Field label="Motif" value={transfer.motif} />
-          <Field label="Devise" value={transfer.currency} mono />
-        </div>
+        <p className="rule-label text-accent-foreground">Champs extraits</p>
+        <h2 className="mt-2 text-2xl">{transfer.transfer_reference || "Virement"}</h2>
       </div>
-      {analysis && (
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="Référence" value={transfer.transfer_reference} mono />
+        <Field label="Direction" value={transfer.direction} />
+        <Field label="Montant" value={money(transfer.amount, transfer.currency)} mono />
+        <Field label="Devise" value={transfer.currency} mono />
+        <Field label="Date d'exécution" value={formatDate(transfer.execution_date)} mono />
+        <Field label="Date de valeur" value={formatDate(transfer.value_date)} mono />
+        <Field label="Émetteur" value={transfer.sender_name} />
+        <Field label="IBAN émetteur" value={transfer.sender_iban} mono />
+        <Field
+          label="Bénéficiaire"
+          value={transfer.beneficiary_name || transfer.receiver_name}
+        />
+        <Field
+          label="IBAN bénéficiaire"
+          value={transfer.beneficiary_iban || transfer.receiver_iban}
+          mono
+        />
+        <Field label="BIC" value={transfer.bic || transfer.beneficiary_bic} mono />
+        <Field label="Banque" value={transfer.bank_name} />
+        <Field label="Type" value={transfer.transfer_type} />
+        <Field label="Motif" value={transfer.motif} />
+      </div>
+
+      <RemainingFields data={transfer as Record<string, unknown>} exclude={known} />
+
+      {analysisText && (
         <div>
-          <p className="font-mono text-[10px] uppercase tracking-widest text-ink/40 mb-2">
-            Analyse
+          <p className="rule-label mb-2 text-muted-foreground">Analyse</p>
+          <p className="whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">
+            {analysisText}
           </p>
-          <p className="text-sm text-ink/80 leading-relaxed whitespace-pre-wrap">{analysis}</p>
         </div>
       )}
-      {incoherences && incoherences.length > 0 && (
+
+      {!!incoherences?.length && (
         <ul className="space-y-2">
           {incoherences.map((inc, i) => (
             <li
               key={i}
-              className="text-sm text-amber-800 bg-amber-50 border border-amber-100 px-4 py-3 rounded-xl"
+              className="rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm"
             >
               {inc}
             </li>
           ))}
         </ul>
       )}
+    </Card>
+  );
+}
+
+function DuplicateCompare({ pending }: { pending: CapturePending }) {
+  return (
+    <Card className="p-6">
+      <Badge tone="warning">Doublon possible</Badge>
+      <p className="mt-3 text-sm text-muted-foreground">
+        Comparez les deux documents, puis répondez dans la conversation à droite.
+      </p>
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        {pending.existing_invoice && (
+          <MiniInvoice title="Facture existante" invoice={pending.existing_invoice} />
+        )}
+        {pending.new_invoice && (
+          <MiniInvoice title="Nouveau document" invoice={pending.new_invoice} />
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function MiniInvoice({ title, invoice }: { title: string; invoice: Invoice }) {
+  return (
+    <div className="rounded-xl border border-border bg-secondary/30 p-4 text-sm">
+      <p className="rule-label text-muted-foreground">{title}</p>
+      <p className="mt-2 font-semibold">{invoice.issuer_name || "—"}</p>
+      <p className="font-mono text-xs text-muted-foreground">{invoice.invoice_number || "—"}</p>
+      <p className="mt-1 font-mono text-xs">
+        {invoice.total_ttc != null ? (
+          <Money value={invoice.total_ttc} currency={invoice.currency} />
+        ) : (
+          "—"
+        )}
+      </p>
     </div>
   );
 }
 
-function SidebarList({
-  title,
-  empty,
-  items,
-  selectedId,
-  onSelect,
+function HistoryLists({
+  invoices,
+  virements,
+  invoicesLoading,
+  virementsLoading,
+  invoicesError,
+  onRetryInvoices,
+  onSelectInvoice,
+  onSelectVirement,
 }: {
-  title: string;
-  empty: string;
-  items: { id: string; title: string; meta: string; amount: string }[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
+  invoices?: InvoiceListItem[];
+  virements?: VirementListItem[];
+  invoicesLoading: boolean;
+  virementsLoading: boolean;
+  invoicesError: boolean;
+  onRetryInvoices: () => void;
+  onSelectInvoice: (row: InvoiceListItem) => void;
+  onSelectVirement: (row: VirementListItem) => void;
 }) {
   return (
-    <div className="space-y-3">
-      <h3 className="font-mono text-[11px] uppercase tracking-[0.25em] text-teal-dark">
-        {title}
-      </h3>
-      {items.length === 0 ? (
-        <div className="bg-white border border-border rounded-2xl p-6 text-center text-ink/40 text-sm">
-          {empty}
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {items.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => onSelect(item.id)}
-              className={`w-full text-left bg-white border rounded-2xl p-5 space-y-1 transition-colors ${
-                selectedId === item.id
-                  ? "border-teal-dark"
-                  : "border-border hover:border-ink/30"
-              }`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-sm truncate">{item.title}</span>
-                <span className="font-mono text-xs text-ink/50 shrink-0">{item.amount}</span>
-              </div>
-              <p className="text-xs text-ink/50">{item.meta}</p>
-            </button>
-          ))}
-        </div>
-      )}
+    <div className="grid gap-4 sm:grid-cols-2">
+      <Card className="p-5">
+        <h2 className="text-lg">Factures enregistrées</h2>
+        {invoicesLoading && <LoadingBlock />}
+        {invoicesError && (
+          <ErrorBlock message="Liste indisponible." onRetry={onRetryInvoices} />
+        )}
+        {invoices?.length === 0 && (
+          <EmptyState title="Aucune facture" description="Déposez votre premier document." />
+        )}
+        <ul className="mt-3 space-y-2">
+          {invoices?.map((row) => {
+            const inv = row.invoice;
+            return (
+              <li key={row.document_id}>
+                <button
+                  type="button"
+                  onClick={() => onSelectInvoice(row)}
+                  className="w-full rounded-xl border border-border p-3 text-left text-sm transition-colors hover:border-accent"
+                >
+                  <div className="flex justify-between gap-2">
+                    <span className="font-medium">{inv.invoice_number || "Sans numéro"}</span>
+                    <Money value={inv.total_ttc} currency={inv.currency} />
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {inv.client_name || inv.issuer_name} · {formatDate(inv.issue_date)}
+                  </p>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </Card>
+
+      <Card className="p-5">
+        <h2 className="text-lg">Virements</h2>
+        {virementsLoading && <LoadingBlock />}
+        {virements?.length === 0 && (
+          <p className="mt-2 text-sm text-muted-foreground">Aucun virement.</p>
+        )}
+        <ul className="mt-3 space-y-2">
+          {virements?.map((row) => {
+            const v = row.transfer;
+            return (
+              <li key={row.document_id}>
+                <button
+                  type="button"
+                  onClick={() => onSelectVirement(row)}
+                  className="w-full rounded-xl border border-border p-3 text-left text-sm transition-colors hover:border-accent"
+                >
+                  <div className="flex justify-between gap-2">
+                    <span className="font-medium">{v.transfer_reference || "Virement"}</span>
+                    <Money value={v.amount} currency={v.currency} />
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {v.direction} · {formatDate(v.execution_date)}
+                  </p>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </Card>
     </div>
+  );
+}
+
+function InvoicePreview({ invoice }: { invoice: Invoice }) {
+  return (
+    <Card className="p-6">
+      <p className="rule-label text-muted-foreground">Aperçu</p>
+      <h3 className="mt-2 text-xl">{invoice.invoice_number || "Facture"}</h3>
+      <p className="mt-1 text-sm text-muted-foreground">{invoice.issuer_name}</p>
+      <p className="mt-4 font-mono text-lg">
+        <Money value={invoice.total_ttc} currency={invoice.currency} />
+      </p>
+    </Card>
   );
 }

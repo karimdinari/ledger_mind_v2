@@ -10,7 +10,6 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as AbonnementRouteImport } from './routes/abonnement'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as CaptureRouteImport } from './routes/capture'
 import { Route as DashboardRouteImport } from './routes/dashboard'
@@ -20,19 +19,14 @@ import { Route as ParametresRouteImport } from './routes/parametres'
 import { Route as ReferralRouteImport } from './routes/referral'
 import { Route as SimulateurRouteImport } from './routes/simulateur'
 import { Route as OnboardingIndexRouteImport } from './routes/onboarding.index'
+import { Route as OnboardingDiagnosticRouteImport } from './routes/onboarding.diagnostic'
 import { Route as OnboardingProfilRouteImport } from './routes/onboarding.profil'
 import { Route as OnboardingVerificationRouteImport } from './routes/onboarding.verification'
-import { Route as OnboardingDiagnosticIndexRouteImport } from './routes/onboarding.diagnostic.index'
 import { Route as OnboardingDiagnosticResultatRouteImport } from './routes/onboarding.diagnostic.resultat'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AbonnementRoute = AbonnementRouteImport.update({
-  id: '/abonnement',
-  path: '/abonnement',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthRoute = AuthRouteImport.update({
@@ -80,6 +74,11 @@ const OnboardingIndexRoute = OnboardingIndexRouteImport.update({
   path: '/onboarding/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const OnboardingDiagnosticRoute = OnboardingDiagnosticRouteImport.update({
+  id: '/onboarding/diagnostic',
+  path: '/onboarding/diagnostic',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const OnboardingProfilRoute = OnboardingProfilRouteImport.update({
   id: '/onboarding/profil',
   path: '/onboarding/profil',
@@ -90,22 +89,15 @@ const OnboardingVerificationRoute = OnboardingVerificationRouteImport.update({
   path: '/onboarding/verification',
   getParentRoute: () => rootRouteImport,
 } as any)
-const OnboardingDiagnosticIndexRoute =
-  OnboardingDiagnosticIndexRouteImport.update({
-    id: '/onboarding/diagnostic/',
-    path: '/onboarding/diagnostic/',
-    getParentRoute: () => rootRouteImport,
-  } as any)
 const OnboardingDiagnosticResultatRoute =
   OnboardingDiagnosticResultatRouteImport.update({
-    id: '/onboarding/diagnostic/resultat',
-    path: '/onboarding/diagnostic/resultat',
-    getParentRoute: () => rootRouteImport,
+    id: '/resultat',
+    path: '/resultat',
+    getParentRoute: () => OnboardingDiagnosticRoute,
   } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/abonnement': typeof AbonnementRoute
   '/auth': typeof AuthRoute
   '/capture': typeof CaptureRoute
   '/dashboard': typeof DashboardRoute
@@ -114,15 +106,14 @@ export interface FileRoutesByFullPath {
   '/parametres': typeof ParametresRoute
   '/referral': typeof ReferralRoute
   '/simulateur': typeof SimulateurRoute
+  '/onboarding/diagnostic': typeof OnboardingDiagnosticRouteWithChildren
   '/onboarding/profil': typeof OnboardingProfilRoute
   '/onboarding/verification': typeof OnboardingVerificationRoute
   '/onboarding/': typeof OnboardingIndexRoute
   '/onboarding/diagnostic/resultat': typeof OnboardingDiagnosticResultatRoute
-  '/onboarding/diagnostic/': typeof OnboardingDiagnosticIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/abonnement': typeof AbonnementRoute
   '/auth': typeof AuthRoute
   '/capture': typeof CaptureRoute
   '/dashboard': typeof DashboardRoute
@@ -131,16 +122,15 @@ export interface FileRoutesByTo {
   '/parametres': typeof ParametresRoute
   '/referral': typeof ReferralRoute
   '/simulateur': typeof SimulateurRoute
+  '/onboarding/diagnostic': typeof OnboardingDiagnosticRouteWithChildren
   '/onboarding/profil': typeof OnboardingProfilRoute
   '/onboarding/verification': typeof OnboardingVerificationRoute
   '/onboarding': typeof OnboardingIndexRoute
   '/onboarding/diagnostic/resultat': typeof OnboardingDiagnosticResultatRoute
-  '/onboarding/diagnostic': typeof OnboardingDiagnosticIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/abonnement': typeof AbonnementRoute
   '/auth': typeof AuthRoute
   '/capture': typeof CaptureRoute
   '/dashboard': typeof DashboardRoute
@@ -149,17 +139,16 @@ export interface FileRoutesById {
   '/parametres': typeof ParametresRoute
   '/referral': typeof ReferralRoute
   '/simulateur': typeof SimulateurRoute
+  '/onboarding/diagnostic': typeof OnboardingDiagnosticRouteWithChildren
   '/onboarding/profil': typeof OnboardingProfilRoute
   '/onboarding/verification': typeof OnboardingVerificationRoute
   '/onboarding/': typeof OnboardingIndexRoute
   '/onboarding/diagnostic/resultat': typeof OnboardingDiagnosticResultatRoute
-  '/onboarding/diagnostic/': typeof OnboardingDiagnosticIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/abonnement'
     | '/auth'
     | '/capture'
     | '/dashboard'
@@ -168,15 +157,14 @@ export interface FileRouteTypes {
     | '/parametres'
     | '/referral'
     | '/simulateur'
+    | '/onboarding/diagnostic'
     | '/onboarding/profil'
     | '/onboarding/verification'
     | '/onboarding/'
     | '/onboarding/diagnostic/resultat'
-    | '/onboarding/diagnostic/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/abonnement'
     | '/auth'
     | '/capture'
     | '/dashboard'
@@ -185,15 +173,14 @@ export interface FileRouteTypes {
     | '/parametres'
     | '/referral'
     | '/simulateur'
+    | '/onboarding/diagnostic'
     | '/onboarding/profil'
     | '/onboarding/verification'
     | '/onboarding'
     | '/onboarding/diagnostic/resultat'
-    | '/onboarding/diagnostic'
   id:
     | '__root__'
     | '/'
-    | '/abonnement'
     | '/auth'
     | '/capture'
     | '/dashboard'
@@ -202,16 +189,15 @@ export interface FileRouteTypes {
     | '/parametres'
     | '/referral'
     | '/simulateur'
+    | '/onboarding/diagnostic'
     | '/onboarding/profil'
     | '/onboarding/verification'
     | '/onboarding/'
     | '/onboarding/diagnostic/resultat'
-    | '/onboarding/diagnostic/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  AbonnementRoute: typeof AbonnementRoute
   AuthRoute: typeof AuthRoute
   CaptureRoute: typeof CaptureRoute
   DashboardRoute: typeof DashboardRoute
@@ -220,11 +206,10 @@ export interface RootRouteChildren {
   ParametresRoute: typeof ParametresRoute
   ReferralRoute: typeof ReferralRoute
   SimulateurRoute: typeof SimulateurRoute
+  OnboardingDiagnosticRoute: typeof OnboardingDiagnosticRouteWithChildren
   OnboardingProfilRoute: typeof OnboardingProfilRoute
   OnboardingVerificationRoute: typeof OnboardingVerificationRoute
   OnboardingIndexRoute: typeof OnboardingIndexRoute
-  OnboardingDiagnosticResultatRoute: typeof OnboardingDiagnosticResultatRoute
-  OnboardingDiagnosticIndexRoute: typeof OnboardingDiagnosticIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -234,13 +219,6 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/abonnement': {
-      id: '/abonnement'
-      path: '/abonnement'
-      fullPath: '/abonnement'
-      preLoaderRoute: typeof AbonnementRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/auth': {
@@ -306,6 +284,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OnboardingIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/onboarding/diagnostic': {
+      id: '/onboarding/diagnostic'
+      path: '/onboarding/diagnostic'
+      fullPath: '/onboarding/diagnostic'
+      preLoaderRoute: typeof OnboardingDiagnosticRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/onboarding/profil': {
       id: '/onboarding/profil'
       path: '/onboarding/profil'
@@ -320,26 +305,29 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OnboardingVerificationRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/onboarding/diagnostic/': {
-      id: '/onboarding/diagnostic/'
-      path: '/onboarding/diagnostic'
-      fullPath: '/onboarding/diagnostic/'
-      preLoaderRoute: typeof OnboardingDiagnosticIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/onboarding/diagnostic/resultat': {
       id: '/onboarding/diagnostic/resultat'
-      path: '/onboarding/diagnostic/resultat'
+      path: '/resultat'
       fullPath: '/onboarding/diagnostic/resultat'
       preLoaderRoute: typeof OnboardingDiagnosticResultatRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof OnboardingDiagnosticRoute
     }
   }
 }
 
+interface OnboardingDiagnosticRouteChildren {
+  OnboardingDiagnosticResultatRoute: typeof OnboardingDiagnosticResultatRoute
+}
+
+const OnboardingDiagnosticRouteChildren: OnboardingDiagnosticRouteChildren = {
+  OnboardingDiagnosticResultatRoute: OnboardingDiagnosticResultatRoute,
+}
+
+const OnboardingDiagnosticRouteWithChildren =
+  OnboardingDiagnosticRoute._addFileChildren(OnboardingDiagnosticRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  AbonnementRoute: AbonnementRoute,
   AuthRoute: AuthRoute,
   CaptureRoute: CaptureRoute,
   DashboardRoute: DashboardRoute,
@@ -348,11 +336,10 @@ const rootRouteChildren: RootRouteChildren = {
   ParametresRoute: ParametresRoute,
   ReferralRoute: ReferralRoute,
   SimulateurRoute: SimulateurRoute,
+  OnboardingDiagnosticRoute: OnboardingDiagnosticRouteWithChildren,
   OnboardingProfilRoute: OnboardingProfilRoute,
   OnboardingVerificationRoute: OnboardingVerificationRoute,
   OnboardingIndexRoute: OnboardingIndexRoute,
-  OnboardingDiagnosticResultatRoute: OnboardingDiagnosticResultatRoute,
-  OnboardingDiagnosticIndexRoute: OnboardingDiagnosticIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

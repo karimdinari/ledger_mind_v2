@@ -1,14 +1,20 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
-import { AppShell, PageHeader } from "@/components/lm/AppShell";
-import { isAuthed } from "@/lib/auth";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Trash2 } from "lucide-react";
+import { AppShell, PageHeader } from "@/components/app-shell";
+import { PremiumGate } from "@/components/paywall";
 import {
-  deleteEducationConversation,
-  deleteOrchestratorSession,
-  fetchEducationConversations,
-  fetchMySessions,
-  type EducationConversationSummary,
-} from "@/lib/api";
+  Badge,
+  Button,
+  ButtonLink,
+  Card,
+  EmptyState,
+  ErrorBlock,
+  LoadingBlock,
+  formatDate,
+} from "@/components/ui-kit";
+import { api } from "@/lib/api";
+import { saveSession } from "@/lib/session-store";
 
 export const Route = createFileRoute("/historique")({
   head: () => ({
@@ -21,169 +27,156 @@ export const Route = createFileRoute("/historique")({
       { property: "og:title", content: "Historique — LedgerMind" },
     ],
   }),
-  component: HistoriquePage,
+  component: Page,
 });
 
-type SessionRow = {
-  session_id: string;
-  branch: string | null;
-  phase: string | null;
-  updated_at: string;
-  title?: string | null;
-};
+function Page() {
+  return (
+    <PremiumGate
+      feature="historique"
+      title="Votre historique"
+      pitch="Retrouvez tous vos parcours et conversations fiscales en un seul endroit."
+      benefits={[
+        "Sessions intake et diagnostic",
+        "Conversations Éducation persistées",
+        "Suppression et reprise en un clic",
+      ]}
+      preview={
+        <Card className="p-8">
+          <p className="font-medium">Diagnostic sans SIREN</p>
+          <p className="mt-1 text-sm text-muted-foreground">guidance · diagnostic_roadmap · hier</p>
+        </Card>
+      }
+    >
+      <Historique />
+    </PremiumGate>
+  );
+}
 
-function HistoriquePage() {
-  const navigate = useNavigate();
-  const [sessions, setSessions] = useState<SessionRow[]>([]);
-  const [conversations, setConversations] = useState<EducationConversationSummary[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  async function load() {
-    setLoading(true);
-    setError(null);
-    try {
-      const [s, c] = await Promise.all([
-        fetchMySessions(),
-        fetchEducationConversations(),
-      ]);
-      setSessions(s);
-      setConversations(c);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Chargement impossible");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    if (!isAuthed()) {
-      navigate({ to: "/auth", replace: true });
-      return;
-    }
-    load();
-  }, [navigate]);
-
-  async function removeSession(id: string) {
-    await deleteOrchestratorSession(id);
-    await load();
-  }
-
-  async function removeConversation(id: string) {
-    await deleteEducationConversation(id);
-    await load();
-  }
+function Historique() {
+  const qc = useQueryClient();
+  const sessions = useQuery({ queryKey: ["my-sessions"], queryFn: () => api.mySessions(), retry: false });
+  const conversations = useQuery({
+    queryKey: ["education-conversations"],
+    queryFn: () => api.conversations(),
+    retry: false,
+  });
 
   return (
     <AppShell>
       <PageHeader
-        eyebrow="Historique"
-        title={
-          <>
-            Vos parcours, <span className="italic font-normal">conservés.</span>
-          </>
-        }
+        eyebrow="Premium"
+        title="Historique"
         description="Sessions d'onboarding / guidance et conversations de l'assistant fiscal."
       />
 
-      {error && (
-        <div className="mb-6 bg-coral/10 border border-coral/30 rounded-2xl p-4 text-sm text-coral">
-          {error}
-        </div>
-      )}
-
-      {loading ? (
-        <p className="text-ink/40 font-mono text-sm">Chargement…</p>
-      ) : (
-        <div className="grid lg:grid-cols-2 gap-8">
-          <section className="bg-white border border-border rounded-2xl overflow-hidden">
-            <div className="px-6 py-4 border-b border-border">
-              <h2 className="font-semibold">Guidance & intake</h2>
-              <p className="text-xs text-ink/40 mt-1">Sessions orchestrateur</p>
+      <div className="grid gap-8 lg:grid-cols-2">
+        <Card className="overflow-hidden p-0">
+          <div className="border-b border-border px-6 py-4">
+            <h2 className="font-semibold">Guidance & intake</h2>
+            <p className="mt-1 text-xs text-muted-foreground">Sessions orchestrateur</p>
+          </div>
+          {sessions.isLoading && <LoadingBlock />}
+          {sessions.isError && (
+            <div className="p-6">
+              <ErrorBlock message="Impossible de charger les sessions." onRetry={() => void sessions.refetch()} />
             </div>
-            {sessions.length === 0 ? (
-              <p className="p-6 text-sm text-ink/45">Aucune session pour l’instant.</p>
-            ) : (
-              <ul className="divide-y divide-border">
-                {sessions.map((s) => (
-                  <li key={s.session_id} className="px-6 py-4 flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <p className="font-medium truncate">
-                        {s.title ||
-                          (s.branch === "guidance" ? "Diagnostic sans SIREN" : "Profil SIREN")}
-                      </p>
-                      <p className="text-xs text-ink/40 font-mono mt-1">
-                        {s.branch || "—"} · {s.phase || "—"} ·{" "}
-                        {s.updated_at ? new Date(s.updated_at).toLocaleString("fr-FR") : ""}
-                      </p>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {s.branch === "guidance" && (
-                          <Link
-                            to="/onboarding/diagnostic/resultat"
-                            search={{ session: s.session_id }}
-                            className="text-xs text-teal-dark hover:underline"
-                          >
-                            Voir la feuille de route
-                          </Link>
-                        )}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => removeSession(s.session_id)}
-                      className="text-xs text-coral shrink-0"
-                    >
-                      Supprimer
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          <section className="bg-white border border-border rounded-2xl overflow-hidden">
-            <div className="px-6 py-4 border-b border-border flex items-center justify-between">
-              <div>
-                <h2 className="font-semibold">Assistant fiscal</h2>
-                <p className="text-xs text-ink/40 mt-1">Conversations pédagogiques</p>
-              </div>
-              <Link to="/education" className="text-xs text-teal-dark hover:underline">
-                Ouvrir
-              </Link>
-            </div>
-            {conversations.length === 0 ? (
-              <p className="p-6 text-sm text-ink/45">Aucune conversation sauvegardée.</p>
-            ) : (
-              <ul className="divide-y divide-border">
-                {conversations.map((c) => (
-                  <li key={c.id} className="px-6 py-4 flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <Link
-                        to="/education"
-                        className="font-medium hover:text-teal-dark line-clamp-2"
+          )}
+          {sessions.data?.length === 0 && (
+            <EmptyState title="Aucune session" description="Lancez un parcours pour commencer." />
+          )}
+          <ul className="divide-y divide-border">
+            {sessions.data?.map((s) => (
+              <li key={s.session_id} className="flex items-start justify-between gap-4 px-6 py-4">
+                <div className="min-w-0">
+                  <p className="truncate font-medium">
+                    {s.title ||
+                      (s.branch === "guidance" ? "Diagnostic sans SIREN" : "Profil SIREN")}
+                  </p>
+                  <p className="mt-1 font-mono text-xs text-muted-foreground">
+                    {s.branch || "—"} · {s.phase || "—"} · {formatDate(s.updated_at)}
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {s.branch === "guidance" && (
+                      <ButtonLink
+                        to="/onboarding/diagnostic/resultat"
+                        search={{ session: s.session_id } as never}
+                        variant="outline"
+                        size="sm"
+                        onClick={() => saveSession("guidance", s.session_id)}
                       >
-                        {c.title}
-                      </Link>
-                      <p className="text-xs text-ink/40 font-mono mt-1">
-                        {c.updated_at
-                          ? new Date(c.updated_at).toLocaleString("fr-FR")
-                          : ""}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => removeConversation(c.id)}
-                      className="text-xs text-coral shrink-0"
-                    >
-                      Supprimer
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        </div>
-      )}
+                        Ouvrir la feuille de route
+                      </ButtonLink>
+                    )}
+                    <Badge>{s.phase || "en cours"}</Badge>
+                  </div>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Supprimer"
+                  onClick={async () => {
+                    await api.deleteSession(s.session_id);
+                    void qc.invalidateQueries({ queryKey: ["my-sessions"] });
+                  }}
+                >
+                  <Trash2 />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </Card>
+
+        <Card className="overflow-hidden p-0">
+          <div className="border-b border-border px-6 py-4">
+            <h2 className="font-semibold">Éducation</h2>
+            <p className="mt-1 text-xs text-muted-foreground">Conversations pédagogiques</p>
+          </div>
+          {conversations.isLoading && <LoadingBlock />}
+          {conversations.isError && (
+            <div className="p-6">
+              <ErrorBlock
+                message="Impossible de charger les conversations."
+                onRetry={() => void conversations.refetch()}
+              />
+            </div>
+          )}
+          {conversations.data?.length === 0 && (
+            <EmptyState
+              title="Aucune conversation"
+              description="Posez une question dans Éducation."
+              action={<ButtonLink to="/education" variant="safran">Ouvrir Éducation</ButtonLink>}
+            />
+          )}
+          <ul className="divide-y divide-border">
+            {conversations.data?.map((c) => (
+              <li key={c.id} className="flex items-start justify-between gap-4 px-6 py-4">
+                <div className="min-w-0">
+                  <p className="truncate font-medium">{c.title || "Sans titre"}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{formatDate(c.updated_at)}</p>
+                  <Link
+                    to="/education"
+                    className="mt-2 inline-block text-sm underline decoration-accent underline-offset-4"
+                  >
+                    Ouvrir
+                  </Link>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Supprimer"
+                  onClick={async () => {
+                    await api.deleteConversation(c.id);
+                    void qc.invalidateQueries({ queryKey: ["education-conversations"] });
+                  }}
+                >
+                  <Trash2 />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      </div>
     </AppShell>
   );
 }

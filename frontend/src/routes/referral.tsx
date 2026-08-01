@@ -1,280 +1,293 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
-import { AppShell, PageHeader } from "@/components/lm/AppShell";
-import { isAuthed } from "@/lib/auth";
+import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { toast } from "sonner";
+import { ChevronDown, Copy, Mail } from "lucide-react";
+import { AppShell, PageHeader } from "@/components/app-shell";
+import { PremiumGate } from "@/components/paywall";
 import {
-  generateReferralEmails,
-  fetchReferralHistory,
-  type ReferralEmail,
-  type ReferralHistoryEntry,
-} from "@/lib/api";
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  ErrorBlock,
+  Field,
+  Input,
+  LoadingBlock,
+  Spinner,
+  formatDate,
+} from "@/components/ui-kit";
+import { api, ApiError } from "@/lib/api";
+import type { ReferralEmail, ReferralResult } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/referral")({
   head: () => ({
     meta: [
-      { title: "Expert-Comptable — LedgerMind" },
-      { name: "description", content: "Trouvez un expert-comptable et générez des emails de prise de contact." },
+      { title: "Mise en relation cabinets — LedgerMind" },
+      {
+        name: "description",
+        content:
+          "Indiquez votre ville : LedgerMind trouve des cabinets proches et rédige des emails prêts à envoyer.",
+      },
+      { property: "og:title", content: "Mise en relation cabinets — LedgerMind" },
+      { property: "og:description", content: "Ville → cabinets → emails prêts." },
     ],
   }),
-  component: ReferralPage,
+  component: Page,
 });
 
-function ReferralPage() {
-  const [ville, setVille] = useState("");
-  const [demande, setDemande] = useState(
-    "Je suis auto-entrepreneur et je cherche un expert-comptable pour m'accompagner dans ma déclaration fiscale et mes obligations comptables.",
-  );
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [emails, setEmails] = useState<ReferralEmail[]>([]);
-  const [cabinetsCount, setCabinetsCount] = useState(0);
-  const [history, setHistory] = useState<ReferralHistoryEntry[]>([]);
-  const [expandedEmail, setExpandedEmail] = useState<number | null>(null);
-  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+const DEFAULT_DEMANDE =
+  "Je suis auto-entrepreneur et je cherche un expert-comptable pour m'accompagner dans ma déclaration fiscale et mes obligations comptables.";
 
-  useEffect(() => {
-    if (!isAuthed()) return;
-    fetchReferralHistory()
-      .then(setHistory)
-      .catch(() => {});
-  }, []);
+function Page() {
+  return (
+    <PremiumGate
+      feature="referral"
+      title="Mise en relation avec des cabinets"
+      pitch="Indiquez votre ville : on trouve des cabinets proches et on rédige les emails."
+      benefits={[
+        "Recherche de cabinets près de chez vous",
+        "Emails personnalisés prêts à envoyer",
+        "Historique de vos prises de contact",
+      ]}
+      preview={
+        <Card className="p-8">
+          <Badge tone="accent">Email généré</Badge>
+          <p className="mt-4 font-medium">Objet : Accompagnement micro-BNC — première année</p>
+          <p className="mt-3 text-sm text-muted-foreground">
+            Bonjour, je suis prestataire indépendant à Lyon, en micro-BNC depuis mars…
+          </p>
+        </Card>
+      }
+    >
+      <Referral />
+    </PremiumGate>
+  );
+}
+
+function Referral() {
+  const [ville, setVille] = useState("");
+  const [result, setResult] = useState<ReferralResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [expanded, setExpanded] = useState<number | null>(null);
+  const history = useQuery({
+    queryKey: ["referral-history"],
+    queryFn: () => api.referralHistory(),
+    retry: false,
+  });
 
   async function handleGenerate(e: React.FormEvent) {
     e.preventDefault();
-    if (!ville.trim() || !demande.trim()) return;
-    setLoading(true);
+    const city = ville.trim();
+    if (!city || busy) return;
+
+    setBusy(true);
     setError(null);
-    setEmails([]);
-    setCabinetsCount(0);
+    setResult(null);
+    setExpanded(null);
     try {
-      const res = await generateReferralEmails(ville.trim(), demande.trim());
+      const res = await api.referralGenerate({ ville: city, demande: DEFAULT_DEMANDE });
       if (res.status === "echec") {
         setError(res.error || "Aucun cabinet trouvé.");
-      } else {
-        setEmails(res.emails);
-        setCabinetsCount(res.cabinets_count);
-        fetchReferralHistory().then(setHistory).catch(() => {});
+        return;
       }
+      setResult(res);
+      void history.refetch();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur inattendue.");
+      const msg = err instanceof ApiError ? err.message : "Recherche impossible.";
+      setError(msg);
+      toast.error(msg);
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   }
 
-  function copyToClipboard(text: string, idx: number) {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopiedIdx(idx);
-      setTimeout(() => setCopiedIdx(null), 2000);
-    });
-  }
+  const emails = result?.emails ?? [];
+  const cabinetsCount = result?.cabinets_count ?? emails.length;
 
   return (
     <AppShell>
       <PageHeader
-        eyebrow="Expert-Comptable"
-        title={
-          <>
-            Trouvez un comptable, <span className="italic font-normal">contactez-le.</span>
-          </>
-        }
-        description="Indiquez votre ville et votre besoin. L'agent referral cherche des cabinets proches et rédige un email personnalisé pour chacun."
+        eyebrow="Premium"
+        title="Trouver un expert-comptable"
+        description="Indiquez votre ville. LedgerMind cherche des cabinets proches et génère un email pour chacun."
       />
 
-      <div className="grid lg:grid-cols-12 gap-10 items-start">
-        <div className="lg:col-span-7 space-y-6">
-          <form
-            onSubmit={handleGenerate}
-            className="bg-white border border-border rounded-2xl p-8 space-y-5"
-          >
-            <div>
-              <label className="text-xs uppercase tracking-widest text-ink/50 font-semibold">
-                Ville
-              </label>
-              <input
-                type="text"
-                value={ville}
-                onChange={(e) => setVille(e.target.value)}
-                placeholder="ex. Lyon, Marseille, Bordeaux…"
-                className="w-full mt-2 px-0 py-3 bg-transparent border-b border-border text-lg focus:outline-none focus:border-ink transition-colors"
-              />
-            </div>
-            <div>
-              <label className="text-xs uppercase tracking-widest text-ink/50 font-semibold">
-                Votre demande
-              </label>
-              <textarea
-                rows={3}
-                value={demande}
-                onChange={(e) => setDemande(e.target.value)}
-                className="w-full mt-2 px-0 py-3 bg-transparent border-b border-border text-base focus:outline-none focus:border-ink transition-colors resize-none"
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={loading || !ville.trim()}
-              className="px-8 py-4 bg-ink text-background rounded-xl font-semibold hover:bg-teal-dark transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {loading ? "Recherche en cours…" : "Trouver & générer"}
-            </button>
-          </form>
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
+        <div className="space-y-6">
+          <Card className="p-6 sm:p-8">
+            <form onSubmit={(e) => void handleGenerate(e)} className="space-y-5">
+              <Field label="Ville" htmlFor="ville">
+                <Input
+                  id="ville"
+                  value={ville}
+                  onChange={(e) => setVille(e.target.value)}
+                  placeholder="ex. Lyon, Marseille, Bordeaux…"
+                  maxLength={80}
+                  autoComplete="address-level2"
+                />
+              </Field>
+              <Button
+                type="submit"
+                variant="safran"
+                disabled={busy || ville.trim().length < 2}
+                className="w-full sm:w-auto"
+              >
+                {busy ? <Spinner /> : null}
+                {busy ? "Recherche en cours…" : "Trouver & générer"}
+              </Button>
+            </form>
+          </Card>
 
-          {error && (
-            <div className="bg-coral/10 border border-coral/30 rounded-2xl p-6 text-sm text-coral font-medium">
-              {error}
-            </div>
-          )}
+          {error && <ErrorBlock message={error} />}
 
-          {loading && (
-            <div className="bg-white border border-border rounded-2xl p-10 text-center space-y-3">
-              <div className="inline-block size-8 border-[3px] border-ink/20 border-t-teal-dark rounded-full animate-spin" />
-              <p className="text-ink/50 text-sm">
-                Recherche de cabinets et génération des emails… Cela peut prendre 30 à 60 secondes.
+          {busy && (
+            <Card className="p-10 text-center">
+              <Spinner className="mx-auto size-8" />
+              <p className="mt-4 text-sm text-muted-foreground">
+                Recherche de cabinets et génération des emails… 30 à 60 secondes.
               </p>
-            </div>
+            </Card>
           )}
 
-          {!loading && emails.length > 0 && (
+          {!busy && emails.length > 0 && (
             <section className="space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <h2 className="text-lg font-semibold">
                   {cabinetsCount} cabinet{cabinetsCount > 1 ? "s" : ""} trouvé
                   {cabinetsCount > 1 ? "s" : ""}
                 </h2>
-                <span className="text-[10px] font-mono uppercase tracking-widest text-teal-dark">
+                <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
                   {emails.length} email{emails.length > 1 ? "s" : ""} généré
                   {emails.length > 1 ? "s" : ""}
                 </span>
               </div>
 
               {emails.map((em, i) => (
-                <div
-                  key={i}
-                  className="bg-white border border-border rounded-2xl overflow-hidden"
-                >
-                  <button
-                    type="button"
-                    onClick={() => setExpandedEmail(expandedEmail === i ? null : i)}
-                    className="w-full p-6 flex items-center justify-between gap-4 text-left hover:bg-background/50 transition-colors"
-                  >
-                    <div className="min-w-0">
-                      <p className="font-semibold truncate">{em.destinataire}</p>
-                      <p className="text-sm text-ink/50 truncate">
-                        {em.email ?? "Email non trouvé"} ·{" "}
-                        <span
-                          className={
-                            em.statut === "ok"
-                              ? "text-teal-dark"
-                              : em.statut === "email_introuvable"
-                                ? "text-amber-600"
-                                : "text-coral"
-                          }
-                        >
-                          {em.statut === "ok"
-                            ? "Prêt à envoyer"
-                            : em.statut === "email_introuvable"
-                              ? "Email manquant"
-                              : "Erreur"}
-                        </span>
-                      </p>
-                    </div>
-                    <svg
-                      className={`size-5 text-ink/30 shrink-0 transition-transform ${expandedEmail === i ? "rotate-180" : ""}`}
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                      strokeWidth={2}
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                    </svg>
-                  </button>
-
-                  {expandedEmail === i && (
-                    <div className="border-t border-border p-6 space-y-4">
-                      <div>
-                        <p className="text-xs uppercase tracking-widest text-ink/40 font-semibold mb-1">
-                          Objet
-                        </p>
-                        <p className="text-sm font-medium">{em.objet}</p>
-                      </div>
-                      <div>
-                        <p className="text-xs uppercase tracking-widest text-ink/40 font-semibold mb-2">
-                          Corps
-                        </p>
-                        <pre className="whitespace-pre-wrap text-sm text-ink/80 bg-background rounded-xl p-4 font-sans leading-relaxed">
-                          {em.corps}
-                        </pre>
-                      </div>
-                      <div className="flex gap-3">
-                        <button
-                          type="button"
-                          onClick={() => copyToClipboard(em.corps, i)}
-                          className="px-5 py-2.5 bg-ink text-background rounded-lg text-sm font-medium hover:bg-teal-dark transition-colors"
-                        >
-                          {copiedIdx === i ? "Copié !" : "Copier le texte"}
-                        </button>
-                        {em.email && (
-                          <a
-                            href={`mailto:${em.email}?subject=${encodeURIComponent(em.objet)}&body=${encodeURIComponent(em.corps)}`}
-                            className="px-5 py-2.5 border border-border rounded-lg text-sm font-medium hover:border-ink transition-colors"
-                          >
-                            Ouvrir dans le client mail
-                          </a>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
+                <EmailCard
+                  key={`${em.destinataire}-${i}`}
+                  email={em}
+                  open={expanded === i}
+                  onToggle={() => setExpanded(expanded === i ? null : i)}
+                />
               ))}
             </section>
           )}
         </div>
 
-        <div className="lg:col-span-5 lg:sticky lg:top-24 space-y-6">
-          <h3 className="font-mono text-[11px] uppercase tracking-[0.25em] text-teal-dark">
-            Historique des recherches
-          </h3>
-          {history.length === 0 ? (
-            <div className="bg-white border border-border rounded-2xl p-6 text-center text-ink/40 text-sm">
-              Aucune recherche effectuée.
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {history
-                .slice()
-                .reverse()
-                .map((h, i) => (
-                  <div
-                    key={i}
-                    className="bg-white border border-border rounded-2xl p-5 space-y-2"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-semibold text-sm">{h.ville}</span>
-                      <span
-                        className={`text-[10px] font-mono uppercase tracking-widest ${
-                          h.status === "termine" ? "text-teal-dark" : "text-coral"
-                        }`}
-                      >
-                        {h.status === "termine"
-                          ? `${h.cabinets_count} cabinet${h.cabinets_count > 1 ? "s" : ""}`
-                          : "Échec"}
-                      </span>
-                    </div>
-                    <p className="text-xs text-ink/50 line-clamp-2">{h.demande}</p>
-                    <p className="text-[10px] text-ink/30 font-mono">
-                      {new Date(h.created_at).toLocaleString("fr-FR", {
-                        day: "numeric",
-                        month: "short",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </p>
-                  </div>
-                ))}
-            </div>
-          )}
-        </div>
+        <aside>
+          <Card className="p-5">
+            <h2 className="text-lg">Historique</h2>
+            {history.isLoading && <LoadingBlock />}
+            {history.isError && (
+              <ErrorBlock
+                message="Historique indisponible."
+                onRetry={() => void history.refetch()}
+              />
+            )}
+            {history.data?.length === 0 && (
+              <EmptyState title="Aucune demande" description="Vos recherches apparaîtront ici." />
+            )}
+            <ul className="mt-3 space-y-2">
+              {history.data?.map((h, i) => (
+                <li key={i} className="rounded-xl border border-border p-3 text-sm">
+                  <p className="font-medium">{h.ville}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {formatDate(h.created_at)} · {h.cabinets_count ?? h.emails?.length ?? 0}{" "}
+                    cabinet(s)
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </Card>
+        </aside>
       </div>
     </AppShell>
+  );
+}
+
+function EmailCard({
+  email,
+  open,
+  onToggle,
+}: {
+  email: ReferralEmail;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const tone =
+    email.statut === "ok"
+      ? "success"
+      : email.statut === "email_introuvable"
+        ? "warning"
+        : email.statut
+          ? "danger"
+          : "neutral";
+
+  const statutLabel =
+    email.statut === "ok"
+      ? "Prêt à envoyer"
+      : email.statut === "email_introuvable"
+        ? "Email manquant"
+        : email.statut || "—";
+
+  return (
+    <Card className="animate-rise overflow-hidden p-0">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center justify-between gap-4 p-6 text-left transition-colors hover:bg-secondary/40"
+      >
+        <div className="min-w-0">
+          <p className="truncate font-semibold">{email.destinataire}</p>
+          <p className="mt-1 truncate text-sm text-muted-foreground">
+            {email.email ?? "Email non trouvé"} · {statutLabel}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {email.statut && <Badge tone={tone}>{statutLabel}</Badge>}
+          <ChevronDown
+            className={cn("size-5 text-muted-foreground transition-transform", open && "rotate-180")}
+          />
+        </div>
+      </button>
+
+      {open && (
+        <div className="space-y-4 border-t border-border p-6">
+          <div>
+            <p className="rule-label mb-1 text-muted-foreground">Objet</p>
+            <p className="text-sm font-medium">{email.objet}</p>
+          </div>
+          <div>
+            <p className="rule-label mb-1 text-muted-foreground">Corps</p>
+            <p className="whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">
+              {email.corps}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                void navigator.clipboard.writeText(`${email.objet}\n\n${email.corps}`);
+                toast.success("Email copié.");
+              }}
+            >
+              <Copy /> Copier
+            </Button>
+            {email.email && (
+              <a
+                href={`mailto:${encodeURIComponent(email.email)}?subject=${encodeURIComponent(email.objet)}&body=${encodeURIComponent(email.corps)}`}
+                className="inline-flex h-9 items-center gap-2 rounded-full bg-primary px-4 text-sm font-semibold text-primary-foreground"
+              >
+                <Mail className="size-4" /> Ouvrir dans ma messagerie
+              </a>
+            )}
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }

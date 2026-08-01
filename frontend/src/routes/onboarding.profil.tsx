@@ -1,517 +1,390 @@
-import { createFileRoute, Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { LogoutBubble } from "@/components/lm/AppShell";
-import { Chatbot, type ChatTurn } from "@/components/lm/Chatbot";
+import { toast } from "sonner";
+import { AppShell, PageHeader } from "@/components/app-shell";
+import { PremiumGate } from "@/components/paywall";
+import { ProfileConfirmEditor, type EditableIntakeProfile } from "@/components/profile-confirm";
 import {
-  getStoredSessionId,
-  fetchUserProfile,
-  orchestratorTurn,
-  type UserProfile,
-} from "@/lib/api";
+  Button,
+  ButtonLink,
+  Card,
+  EmptyState,
+  ErrorBlock,
+  LoadingBlock,
+  Badge,
+} from "@/components/ui-kit";
+import {
+  CompletenessRail,
+  KeyValueList,
+  QuestionCard,
+  UploadCard,
+  VerificationResult,
+} from "@/components/orchestrator";
+import { api, ApiError, detailAsTurn } from "@/lib/api";
+import { invalidateOnboardingCache, useAuth } from "@/lib/auth";
+import { clearSession, loadSession, saveSession } from "@/lib/session-store";
+import type { OrchestratorResponse } from "@/lib/types";
 
 export const Route = createFileRoute("/onboarding/profil")({
   head: () => ({
     meta: [
-      { title: "Votre profil — LedgerMind" },
-      { name: "description", content: "Quelques questions pour personnaliser votre suivi fiscal." },
-      { property: "og:title", content: "Votre profil — LedgerMind" },
+      { title: "Profil fiscal — LedgerMind" },
       {
-        property: "og:description",
-        content: "Quelques questions pour personnaliser votre suivi fiscal.",
+        name: "description",
+        content:
+          "Répondez aux questions de l'agent LedgerMind pour construire votre profil fiscal et obtenir votre régime recommandé.",
       },
+      { property: "og:title", content: "Profil fiscal — LedgerMind" },
+      { property: "og:description", content: "Votre profil fiscal, question après question." },
     ],
   }),
-  component: ProfilPage,
+  component: Page,
 });
 
-function isIntakeComplete(profile: UserProfile): boolean {
-  const questionsDone =
-    profile.activity_types.length > 0 &&
-    profile.main_activity_commercial !== null &&
-    profile.has_secondary_activity !== null &&
-    (profile.has_secondary_activity !== true || profile.secondary_activity_types.length > 0) &&
-    profile.revenue_sources.length > 0 &&
-    profile.international_clients !== null &&
-    profile.currencies.length > 0 &&
-    profile.estimated_monthly_revenue !== null &&
-    profile.estimated_annual_revenue !== null &&
-    profile.revenue_variability !== null &&
-    profile.invoices_already_issued !== null &&
-    profile.has_recurring_contracts !== null &&
-    profile.in_kind_gifts !== null &&
-    profile.first_income_date !== null;
-  return questionsDone || profile.tax_category !== null || profile.fiscal_classification_status === "requires_expert";
+function Page() {
+  return (
+    <PremiumGate
+      feature="onboarding"
+      title="Votre profil fiscal guidé"
+      pitch="Une conversation courte qui aboutit à un régime recommandé et des alertes de conformité."
+      benefits={[
+        "Questions adaptées à votre activité réelle",
+        "Régime recommandé et alertes de conformité",
+        "Actions prioritaires listées, pas de jargon inutile",
+      ]}
+      preview={
+        <Card className="p-8">
+          <p className="rule-label text-muted-foreground">Question de l'agent</p>
+          <p className="mt-3 text-lg">Vos clients sont-ils situés hors de France ?</p>
+        </Card>
+      }
+    >
+      <Profil />
+    </PremiumGate>
+  );
 }
 
-function ProfilPage() {
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [doneTranscript, setDoneTranscript] = useState<ChatTurn[] | null>(null);
-  const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [editingField, setEditingField] = useState<string | null>(null);
-  const [showTranscript, setShowTranscript] = useState(false);
-  const [initialQuestion, setInitialQuestion] = useState<string | undefined>();
-  const [initialQuickReplies, setInitialQuickReplies] = useState<string[]>([]);
+function toEditable(profile: Record<string, unknown>): EditableIntakeProfile {
+  return {
+    denomination: (profile.denomination as string | null) ?? null,
+    siret: (profile.siret as string | null) ?? null,
+    siren: (profile.siren as string | null) ?? null,
+    tax_category: (profile.tax_category as string | null) ?? null,
+    recommended_regime: (profile.recommended_regime as string | null) ?? null,
+    regime_plafond: (profile.regime_plafond as string | null) ?? null,
+    tax_category_reason: (profile.tax_category_reason as string | null) ?? null,
+    fiscal_classification_status: (profile.fiscal_classification_status as string | null) ?? null,
+    fiscal_inconsistency_reason: (profile.fiscal_inconsistency_reason as string | null) ?? null,
+    activity_mismatch: Boolean(profile.activity_mismatch),
+    mismatches: Array.isArray(profile.mismatches)
+      ? (profile.mismatches as Array<{ note?: string }>)
+      : [],
+    activity_types: Array.isArray(profile.activity_types) ? (profile.activity_types as string[]) : [],
+    revenue_sources: Array.isArray(profile.revenue_sources)
+      ? (profile.revenue_sources as string[])
+      : [],
+    currencies: Array.isArray(profile.currencies) ? (profile.currencies as string[]) : [],
+    estimated_monthly_revenue: (profile.estimated_monthly_revenue as string | null) ?? null,
+    estimated_annual_revenue: (profile.estimated_annual_revenue as string | null) ?? null,
+    first_income_date: (profile.first_income_date as string | null) ?? null,
+    revenue_variability:
+      (profile.revenue_variability as EditableIntakeProfile["revenue_variability"]) ?? null,
+    international_clients: (profile.international_clients as boolean | null) ?? null,
+    invoices_already_issued: (profile.invoices_already_issued as boolean | null) ?? null,
+    has_recurring_contracts: (profile.has_recurring_contracts as boolean | null) ?? null,
+    in_kind_gifts: (profile.in_kind_gifts as boolean | null) ?? null,
+    has_secondary_activity: (profile.has_secondary_activity as boolean | null) ?? null,
+    secondary_activity_types: Array.isArray(profile.secondary_activity_types)
+      ? (profile.secondary_activity_types as string[])
+      : [],
+    main_activity_commercial: (profile.main_activity_commercial as boolean | null) ?? null,
+  };
+}
+
+function Profil() {
   const navigate = useNavigate();
-  const routerState = useRouterState({ select: (s) => s.location.state }) as {
-    initialQuestion?: string;
-    initialQuickReplies?: string[];
-  } | undefined;
+  const { refresh } = useAuth();
+  const [state, setState] = useState<OrchestratorResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [patchBusy, setPatchBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [confirming, setConfirming] = useState(false);
+  const sessionId = loadSession("intake");
 
   useEffect(() => {
-    const id = getStoredSessionId();
-    if (!id) {
-      navigate({ to: "/onboarding" });
-      return;
-    }
-    setSessionId(id);
-
-    if (routerState?.initialQuestion) {
-      setInitialQuestion(routerState.initialQuestion);
-      setInitialQuickReplies(routerState.initialQuickReplies ?? []);
-      setLoading(false);
-      return;
-    }
-
-    (async () => {
-      try {
-        const p = await fetchUserProfile(id);
-        if (isIntakeComplete(p)) {
-          setProfile(p);
-        } else {
-          const turn = await orchestratorTurn(id, undefined);
-          if (turn.ui_action === "ask_question" && turn.message) {
-            setInitialQuestion(turn.message);
-            setInitialQuickReplies(turn.quick_replies);
-          } else if (turn.ui_action === "done") {
-            setProfile(turn.profile);
-          }
-        }
-      } catch (err) {
-        console.error(err);
-        navigate({ to: "/onboarding" });
-      } finally {
+    let alive = true;
+    async function boot() {
+      if (!sessionId) {
         setLoading(false);
+        return;
       }
-    })();
-  }, [navigate, routerState?.initialQuestion, routerState?.initialQuickReplies]);
+      try {
+        const detail = await api.sessionDetail(sessionId);
 
-  const handleFinish = (finalProfile: UserProfile, transcript: ChatTurn[]) => {
-    setProfile(finalProfile);
-    setDoneTranscript(transcript);
-  };
+        if (
+          detail.phase === "verification" ||
+          detail.phase === "verification_registry_document" ||
+          detail.phase === "verification_document"
+        ) {
+          if (alive) setError("Reprenez la vérification SIRET avant les questions de profil.");
+          return;
+        }
 
-  const updateProfileField = <K extends keyof UserProfile>(field: K, value: UserProfile[K]) => {
-    if (!profile) return;
-    setProfile({ ...profile, [field]: value });
-  };
+        if (detail.phase === "profile_questions") {
+          const live = await api.turn({ session_id: sessionId });
+          if (alive) setState(live);
+          return;
+        }
 
-  const handleRestart = () => {
-    setProfile(null);
-    setDoneTranscript(null);
-    setEditingField(null);
-    setInitialQuestion(undefined);
-  };
+        if (alive) setState(detailAsTurn(detail));
+      } catch (err) {
+        if (alive) setError(err instanceof ApiError ? err.message : "Session introuvable.");
+      } finally {
+        if (alive) setLoading(false);
+      }
+    }
+    void boot();
+    return () => {
+      alive = false;
+    };
+  }, [sessionId]);
 
-  if (loading) {
+  async function run(fn: () => Promise<OrchestratorResponse>) {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fn();
+      setState(res);
+      saveSession("intake", res.session_id);
+      if (res.ui_action === "done") {
+        toast.success("Questions terminées — vérifiez et ajustez votre synthèse.");
+        invalidateOnboardingCache();
+        void refresh();
+        return;
+      }
+      if (res.ui_action === "requires_expert") {
+        toast.success("Analyse terminée — vérifiez votre profil avant de continuer.");
+        invalidateOnboardingCache();
+        void refresh();
+      }
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Une erreur est survenue.";
+      setError(msg);
+      toast.error(msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function patchProfile(patch: Record<string, unknown>) {
+    if (!sessionId) return;
+    setPatchBusy(true);
+    try {
+      const detail = await api.patchIntakeProfile(sessionId, patch);
+      setState(detailAsTurn(detail));
+      invalidateOnboardingCache();
+      toast.success("Profil mis à jour.");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Modification impossible.");
+    } finally {
+      setPatchBusy(false);
+    }
+  }
+
+  async function confirmAndGoDashboard() {
+    setConfirming(true);
+    try {
+      invalidateOnboardingCache();
+      await refresh();
+      toast.success("Profil confirmé — bienvenue sur votre tableau de bord.");
+      navigate({ to: "/dashboard", replace: true });
+    } catch {
+      toast.error("Impossible d'ouvrir le tableau de bord. Réessayez.");
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  function restartQuestions() {
+    clearSession("intake");
+    navigate({ to: "/onboarding/verification", replace: true });
+  }
+
+  if (loading)
     return (
-      <div className="min-h-screen px-6 py-16 max-w-4xl mx-auto">
-        <p className="text-ink/40 font-mono text-sm">Chargement…</p>
-      </div>
+      <AppShell>
+        <LoadingBlock label="Reprise de votre session…" />
+      </AppShell>
+    );
+
+  if (!sessionId)
+    return (
+      <AppShell>
+        <PageHeader eyebrow="Étape 2" title="Profil fiscal" />
+        <EmptyState
+          title="Aucun parcours en cours"
+          description="Commencez par vérifier votre établissement : les questions suivantes s'appuient dessus."
+          action={
+            <ButtonLink to="/onboarding/verification" variant="safran">
+              Vérifier mon SIRET
+            </ButtonLink>
+          }
+        />
+      </AppShell>
+    );
+
+  if (error?.includes("vérification SIRET")) {
+    return (
+      <AppShell>
+        <PageHeader eyebrow="Étape 2" title="Profil fiscal" />
+        <EmptyState
+          title="Vérification incomplète"
+          description={error}
+          action={
+            <ButtonLink to="/onboarding/verification" variant="safran">
+              Reprendre la vérification
+            </ButtonLink>
+          }
+        />
+      </AppShell>
     );
   }
 
-  return (
-    <div className="min-h-screen px-6 py-16 max-w-4xl mx-auto">
-      <div className="flex items-center justify-between gap-4">
-        <Link
-          to="/onboarding/verification"
-          className="text-xs font-mono uppercase tracking-widest text-ink/40 hover:text-ink"
-        >
-          ← Retour
-        </Link>
-        <LogoutBubble />
-      </div>
+  const profile = (state?.profile as Record<string, unknown>) ?? {};
+  const done = state?.ui_action === "done" || state?.phase === "done";
+  const expert = state?.ui_action === "requires_expert";
+  const showConfirm = done || expert;
 
-      <div className="mt-12">
-        {!profile ? (
-          sessionId && (
-            <Chatbot
-              eyebrow="Construction du profil"
-              orchestratorSessionId={sessionId}
-              initialQuestion={initialQuestion}
-              initialQuickReplies={initialQuickReplies}
-              onOrchestratorFinish={handleFinish}
-              intro="Quelques questions pour adapter LedgerMind à votre activité — le nombre dépend de votre situation."
+  return (
+    <AppShell>
+      <PageHeader
+        eyebrow="Étape 2 · Parcours avec SIREN"
+        title={showConfirm ? "Vérifiez et ajustez votre profil" : "Construisons votre profil fiscal"}
+        description={
+          showConfirm
+            ? "Modifiez n'importe quelle réponse avant de confirmer et d'ouvrir le tableau de bord."
+            : "Chaque réponse affine le régime recommandé et les obligations qui vous concernent."
+        }
+      />
+
+      <div
+        className={
+          showConfirm
+            ? "mx-auto max-w-2xl"
+            : "grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]"
+        }
+      >
+        <div className="space-y-6">
+          {error && <ErrorBlock message={error} />}
+
+          {!showConfirm && state?.ui_action === "ask_question" && (
+            <QuestionCard
+              message={state.message}
+              quickReplies={state.quick_replies}
+              busy={busy}
+              onAnswer={(a) => run(() => api.turn({ session_id: sessionId, user_answer: a }))}
             />
-          )
-        ) : (
-          <div className="max-w-2xl mx-auto animate-slide-up space-y-8">
-            <div>
-              <div className="flex items-center justify-between">
-                <p className="font-mono text-[11px] uppercase tracking-[0.3em] text-teal-dark mb-2">
-                  Validation Human-in-the-Loop
+          )}
+
+          {!showConfirm &&
+            (state?.ui_action === "show_tax_result" || state?.ui_action === "show_compliance") && (
+              <Card className="animate-rise p-6">
+                <Badge tone="info">
+                  {state.ui_action === "show_tax_result" ? "Classification fiscale" : "Conformité"}
+                </Badge>
+                <p className="mt-4 whitespace-pre-wrap text-sm">
+                  {state.message || "Consultez la synthèse à droite, puis continuez."}
                 </p>
-                <button
-                  onClick={handleRestart}
-                  className="text-xs font-semibold text-ink/50 hover:text-coral transition-colors"
+                <Button
+                  className="mt-6"
+                  variant="safran"
+                  disabled={busy}
+                  onClick={() => run(() => api.turn({ session_id: sessionId }))}
                 >
-                  ↺ Recommencer
-                </button>
-              </div>
-              <h1 className="text-4xl md:text-5xl font-extrabold tracking-tighter text-balance">
-                Vérifiez et ajustez <span className="italic font-normal">votre profil</span>.
-              </h1>
-              <p className="mt-3 text-ink/60 text-pretty">
-                Ces informations proviennent de la vérification SIRET et de vos réponses. Vous pouvez
-                modifier n'importe quelle donnée avant de valider.
-              </p>
-            </div>
+                  Continuer
+                </Button>
+              </Card>
+            )}
 
-            {(profile.denomination || profile.siret) && (
-              <div className="bg-teal-dark/5 border border-teal-dark/20 rounded-2xl p-5">
-                <p className="text-xs uppercase tracking-widest text-teal-dark font-semibold mb-2">
-                  Vérification SIRET
+          {!showConfirm && state?.ui_action === "show_verification_result" && (
+            <VerificationResult
+              profile={profile}
+              busy={busy}
+              onContinue={() => run(() => api.turn({ session_id: sessionId }))}
+            />
+          )}
+
+          {!showConfirm &&
+            (state?.ui_action === "upload_registry_document" ||
+              state?.ui_action === "upload_sirene_document") && (
+              <UploadCard
+                title={
+                  state.ui_action === "upload_registry_document"
+                    ? "Document de registre requis"
+                    : "Avis de situation SIRENE"
+                }
+                description={state.message ?? undefined}
+                busy={busy}
+                onFile={(f) =>
+                  run(() =>
+                    api.afterVerificationUpload(sessionId, () =>
+                      state.ui_action === "upload_registry_document"
+                        ? api.registryDocument(sessionId, f)
+                        : api.sireneAvis(sessionId, f),
+                    ),
+                  )
+                }
+              />
+            )}
+
+          {showConfirm && (
+            <ProfileConfirmEditor
+              profile={toEditable(profile)}
+              message={state?.message}
+              expert={expert}
+              busy={patchBusy}
+              confirming={confirming}
+              onPatch={patchProfile}
+              onConfirm={() => void confirmAndGoDashboard()}
+              onRestart={restartQuestions}
+            />
+          )}
+
+          {!state && (
+            <Card className="p-6">
+              <p className="text-sm text-muted-foreground">Session chargée sans action en attente.</p>
+              <Button className="mt-4" onClick={() => run(() => api.turn({ session_id: sessionId }))}>
+                Continuer
+              </Button>
+            </Card>
+          )}
+        </div>
+
+        {!showConfirm && (
+          <aside className="space-y-4 lg:sticky lg:top-8 lg:self-start">
+            <Card className="p-5">
+              <CompletenessRail value={state?.profile_completeness} />
+            </Card>
+            <Card className="p-5">
+              <h2 className="text-lg">Ce que nous savons</h2>
+              {Object.keys(profile).length ? (
+                <KeyValueList data={profile} className="mt-3" />
+              ) : (
+                <p className="mt-2 text-sm text-muted-foreground">
+                  Les informations apparaîtront au fil de vos réponses.
                 </p>
-                <p className="font-semibold">{profile.denomination ?? "—"}</p>
-                <p className="font-mono text-sm text-ink/60 mt-1">{profile.siret}</p>
-                {profile.tax_category && (
-                  <p className="text-sm text-ink/70 mt-2">
-                    Régime : {profile.recommended_regime} ({profile.tax_category}) — {profile.regime_plafond}
-                  </p>
-                )}
-              </div>
-            )}
-
-            {profile.fiscal_classification_status === "requires_expert" && (
-              <div className="rounded-2xl bg-coral/10 border border-coral/30 p-5">
-                <p className="font-semibold text-coral">Classification bloquée — incohérence détectée</p>
-                <p className="text-sm text-ink/70 mt-2">
-                  {profile.fiscal_inconsistency_reason ??
-                    "Contactez votre SIE ou demandez un rescrit fiscal via impots.gouv.fr."}
-                </p>
-              </div>
-            )}
-
-            {profile.activity_mismatch && profile.mismatches.length > 0 && (
-              <div className="rounded-2xl bg-amber-50 border border-amber-200 p-5">
-                <p className="font-semibold text-amber-900">Écart d'activité détecté</p>
-                {profile.mismatches.map((m, i) => (
-                  <p key={i} className="text-sm text-amber-800 mt-1">{m.note}</p>
-                ))}
-              </div>
-            )}
-
-            <div className="bg-white border border-border rounded-2xl divide-y divide-border shadow-sm">
-              <ProfileListField
-                label="Types d'activité"
-                field="activity_types"
-                profile={profile}
-                editingField={editingField}
-                setEditingField={setEditingField}
-                updateProfileField={updateProfileField}
-                render={(val) =>
-                  (val as string[]).length > 0 ? (
-                    (val as string[]).map((act, i) => (
-                      <span key={i} className="px-2.5 py-1 bg-teal-dark/10 text-teal-dark rounded-md text-xs font-medium">
-                        {act}
-                      </span>
-                    ))
-                  ) : (
-                    <span className="text-sm italic text-ink/40">Non renseigné</span>
-                  )
-                }
-              />
-              <ProfileListField
-                label="Sources de revenus / Plateformes"
-                field="revenue_sources"
-                profile={profile}
-                editingField={editingField}
-                setEditingField={setEditingField}
-                updateProfileField={updateProfileField}
-                render={(val) =>
-                  (val as string[]).length > 0 ? (
-                    (val as string[]).map((src, i) => (
-                      <span key={i} className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded-md text-xs font-medium">
-                        {src}
-                      </span>
-                    ))
-                  ) : (
-                    <span className="text-sm italic text-ink/40">Non renseigné</span>
-                  )
-                }
-              />
-              <ProfileListField
-                label="Devises de paiement"
-                field="currencies"
-                profile={profile}
-                editingField={editingField}
-                setEditingField={setEditingField}
-                updateProfileField={updateProfileField}
-                render={(val) =>
-                  (val as string[]).length > 0 ? (
-                    (val as string[]).map((cur, i) => (
-                      <span key={i} className="px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-md text-xs font-mono font-medium">
-                        {cur}
-                      </span>
-                    ))
-                  ) : (
-                    <span className="text-sm italic text-ink/40">Non renseigné</span>
-                  )
-                }
-              />
-              <BoolField
-                label="Clients internationaux"
-                value={profile.international_clients}
-                onToggle={() =>
-                  updateProfileField("international_clients", profile.international_clients === true ? false : true)
-                }
-                trueLabel="Oui (factures hors France / UE)"
-                falseLabel="Non (France uniquement)"
-              />
-              <ProfileStringField
-                label="Revenu mensuel estimé"
-                field="estimated_monthly_revenue"
-                profile={profile}
-                editingField={editingField}
-                setEditingField={setEditingField}
-                updateProfileField={updateProfileField}
-              />
-              <VariabilityField profile={profile} updateProfileField={updateProfileField} />
-              <BoolField
-                label="Factures déjà émises"
-                value={profile.invoices_already_issued}
-                onToggle={() =>
-                  updateProfileField("invoices_already_issued", profile.invoices_already_issued === true ? false : true)
-                }
-              />
-              <BoolField
-                label="Contrats récurrents"
-                value={profile.has_recurring_contracts}
-                onToggle={() =>
-                  updateProfileField("has_recurring_contracts", profile.has_recurring_contracts === true ? false : true)
-                }
-                trueLabel="Oui (abonnements/retainers)"
-                falseLabel="Non (one-shot / par mission)"
-              />
-              <BoolField
-                label="Cadeaux & dotations en nature"
-                value={profile.in_kind_gifts}
-                onToggle={() =>
-                  updateProfileField("in_kind_gifts", profile.in_kind_gifts === true ? false : true)
-                }
-                trueLabel="Oui (produits, voyages, dotations)"
-              />
-              <ProfileStringField
-                label="Début des premiers revenus"
-                field="first_income_date"
-                profile={profile}
-                editingField={editingField}
-                setEditingField={setEditingField}
-                updateProfileField={updateProfileField}
-              />
-            </div>
-
-            {doneTranscript && doneTranscript.length > 0 && (
-              <div className="border border-border rounded-2xl bg-slate-50 p-4">
-                <button
-                  onClick={() => setShowTranscript(!showTranscript)}
-                  className="flex items-center justify-between w-full text-xs font-mono uppercase tracking-wider text-ink/60 hover:text-ink"
-                >
-                  <span>{showTranscript ? "Masquer" : "Voir"} l'historique ({doneTranscript.length} messages)</span>
-                  <span>{showTranscript ? "▲" : "▼"}</span>
-                </button>
-                {showTranscript && (
-                  <div className="mt-4 space-y-3 pt-3 border-t border-border/60 max-h-80 overflow-y-auto">
-                    {doneTranscript.map((t) => (
-                      <div
-                        key={t.id}
-                        className={`text-xs p-3 rounded-xl ${
-                          t.role === "assistant"
-                            ? "bg-white border border-border text-ink/80"
-                            : "bg-teal-dark/10 text-teal-dark font-medium"
-                        }`}
-                      >
-                        {t.text}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            <button
-              onClick={() => navigate({ to: "/dashboard" })}
-              className="w-full px-8 py-5 bg-ink text-background rounded-xl font-semibold hover:bg-teal-dark transition-colors text-center text-base shadow-md"
-            >
-              Confirmer mon profil et continuer vers mon dashboard →
-            </button>
-          </div>
+              )}
+            </Card>
+            <p className="px-1 text-xs text-muted-foreground">
+              Besoin d'un rappel de règle ?{" "}
+              <Link to="/education" className="underline decoration-accent underline-offset-4">
+                Ouvrir l'Éducation
+              </Link>
+            </p>
+          </aside>
         )}
       </div>
-    </div>
-  );
-}
-
-function ProfileListField<K extends keyof UserProfile>({
-  label,
-  field,
-  profile,
-  editingField,
-  setEditingField,
-  updateProfileField,
-  render,
-}: {
-  label: string;
-  field: K;
-  profile: UserProfile;
-  editingField: string | null;
-  setEditingField: (f: string | null) => void;
-  updateProfileField: <Key extends keyof UserProfile>(field: Key, value: UserProfile[Key]) => void;
-  render: (val: UserProfile[K]) => React.ReactNode;
-}) {
-  const val = profile[field];
-  return (
-    <div className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-      <div className="space-y-1">
-        <span className="text-xs font-semibold uppercase tracking-wider text-ink/40">{label}</span>
-        {editingField === field ? (
-          <input
-            type="text"
-            className="w-full text-sm p-2 border border-teal-dark rounded-lg focus:outline-none"
-            defaultValue={(val as string[]).join(", ")}
-            onBlur={(e) => {
-              const items = e.target.value.split(",").map((s) => s.trim()).filter(Boolean);
-              updateProfileField(field, items as UserProfile[K]);
-              setEditingField(null);
-            }}
-            autoFocus
-          />
-        ) : (
-          <div className="flex flex-wrap gap-1.5 pt-1">{render(val)}</div>
-        )}
-      </div>
-      <button
-        onClick={() => setEditingField(editingField === field ? null : (field as string))}
-        className="text-xs font-semibold text-teal-dark hover:underline self-start sm:self-center"
-      >
-        {editingField === field ? "Valider" : "Modifier"}
-      </button>
-    </div>
-  );
-}
-
-function ProfileStringField({
-  label,
-  field,
-  profile,
-  editingField,
-  setEditingField,
-  updateProfileField,
-}: {
-  label: string;
-  field: "estimated_monthly_revenue" | "first_income_date";
-  profile: UserProfile;
-  editingField: string | null;
-  setEditingField: (f: string | null) => void;
-  updateProfileField: <K extends keyof UserProfile>(field: K, value: UserProfile[K]) => void;
-}) {
-  const val = profile[field];
-  return (
-    <div className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-      <div className="space-y-1 flex-1">
-        <span className="text-xs font-semibold uppercase tracking-wider text-ink/40">{label}</span>
-        {editingField === field ? (
-          <input
-            type="text"
-            className="w-full text-sm p-2 border border-teal-dark rounded-lg focus:outline-none"
-            defaultValue={val ?? ""}
-            onBlur={(e) => {
-              updateProfileField(field, e.target.value || null);
-              setEditingField(null);
-            }}
-            autoFocus
-          />
-        ) : (
-          <p className="text-sm font-semibold text-ink">
-            {val || <span className="italic text-ink/40 font-normal">Non renseigné</span>}
-          </p>
-        )}
-      </div>
-      <button
-        onClick={() => setEditingField(editingField === field ? null : field)}
-        className="text-xs font-semibold text-teal-dark hover:underline self-start sm:self-center"
-      >
-        {editingField === field ? "Valider" : "Modifier"}
-      </button>
-    </div>
-  );
-}
-
-function BoolField({
-  label,
-  value,
-  onToggle,
-  trueLabel = "Oui",
-  falseLabel = "Non",
-}: {
-  label: string;
-  value: boolean | null;
-  onToggle: () => void;
-  trueLabel?: string;
-  falseLabel?: string;
-}) {
-  return (
-    <div className="p-5 flex items-center justify-between gap-4">
-      <div>
-        <span className="text-xs font-semibold uppercase tracking-wider text-ink/40 block">{label}</span>
-        <span className="text-sm font-medium text-ink">
-          {value === null ? "Non précisé" : value ? trueLabel : falseLabel}
-        </span>
-      </div>
-      <button onClick={onToggle} className="text-xs font-semibold text-teal-dark hover:underline">
-        Changer
-      </button>
-    </div>
-  );
-}
-
-function VariabilityField({
-  profile,
-  updateProfileField,
-}: {
-  profile: UserProfile;
-  updateProfileField: <K extends keyof UserProfile>(field: K, value: UserProfile[K]) => void;
-}) {
-  return (
-    <div className="p-5 flex items-center justify-between gap-4">
-      <div>
-        <span className="text-xs font-semibold uppercase tracking-wider text-ink/40 block">
-          Stabilité des revenus
-        </span>
-        <span className="text-sm font-medium text-ink">
-          {profile.revenue_variability === "stable"
-            ? "Revenus stables"
-            : profile.revenue_variability === "spiky"
-            ? "Revenus irréguliers (pics de saisonnalité)"
-            : "Non précisé"}
-        </span>
-      </div>
-      <div className="flex gap-2">
-        {(["stable", "spiky"] as const).map((v) => (
-          <button
-            key={v}
-            onClick={() => updateProfileField("revenue_variability", v)}
-            className={`px-3 py-1 text-xs rounded-full border transition-colors ${
-              profile.revenue_variability === v
-                ? "bg-teal-dark text-white border-teal-dark"
-                : "bg-white text-ink/60 border-border hover:border-teal-dark"
-            }`}
-          >
-            {v === "stable" ? "Stables" : "Irréguliers"}
-          </button>
-        ))}
-      </div>
-    </div>
+    </AppShell>
   );
 }

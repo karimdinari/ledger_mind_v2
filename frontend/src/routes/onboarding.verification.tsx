@@ -1,428 +1,384 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
-import { LogoutBubble } from "@/components/lm/AppShell";
-import {
-  ocrExtractSiret,
-  startOrchestrator,
-  orchestratorTurn,
-  uploadRegistryDocument,
-  uploadSireneAvis,
-  getStoredSessionId,
-  type OrchestratorTurnResponse,
-  type UserProfile,
-} from "@/lib/api";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { toast } from "sonner";
+import { ArrowRight, ScanLine } from "lucide-react";
+import { AppShell, PageHeader } from "@/components/app-shell";
+import { PremiumGate } from "@/components/paywall";
+import { Button, Card, ErrorBlock, Field, Input, SectionLabel, Spinner } from "@/components/ui-kit";
+import { StepDoneCard, UploadCard, VerificationResult } from "@/components/orchestrator";
+import { api, ApiError, detailAsTurn } from "@/lib/api";
+import { clearSession, loadSession, saveSession } from "@/lib/session-store";
+import type { OrchestratorResponse } from "@/lib/types";
 
 export const Route = createFileRoute("/onboarding/verification")({
   head: () => ({
     meta: [
-      { title: "Vérification SIREN — LedgerMind" },
-      { name: "description", content: "Vérification registre, test Kbis et archivage SIRENE." },
+      { title: "Vérification SIRET — LedgerMind" },
+      {
+        name: "description",
+        content:
+          "Vérifiez votre établissement auprès des registres officiels et lancez votre parcours d'immatriculation guidé.",
+      },
+      { property: "og:title", content: "Vérification SIRET — LedgerMind" },
+      { property: "og:description", content: "Contrôle officiel de votre établissement." },
     ],
   }),
-  component: VerificationPage,
+  component: Page,
 });
 
-type Tab = "manual" | "upload";
-
-function formatSiren(siren: string): string {
-  const d = siren.replace(/\D/g, "");
-  if (d.length !== 9) return siren;
-  return `${d.slice(0, 3)} ${d.slice(3, 6)} ${d.slice(6)}`;
+function Page() {
+  return (
+    <PremiumGate
+      feature="onboarding"
+      title="Vérification officielle"
+      pitch="Votre SIRET confronté aux registres : forme juridique, code APE, éligibilité micro, écarts détectés."
+      benefits={[
+        "OCR de votre avis de situation pour éviter la saisie",
+        "Écarts entre déclaratif et registre signalés",
+        "Profil fiscal pré-rempli pour la suite du parcours",
+      ]}
+      preview={
+        <Card className="p-8">
+          <SectionLabel>Aperçu du contrôle</SectionLabel>
+          <h3 className="mt-4 text-2xl">Studio Marge Nord — EI</h3>
+          <p className="mt-2 text-sm text-muted-foreground">
+            APE 7410Z · Éligible micro-entreprise · 1 écart détecté sur l'adresse déclarée.
+          </p>
+        </Card>
+      }
+    >
+      <Verification />
+    </PremiumGate>
+  );
 }
 
-function formatSiret(siret: string): string {
-  const d = siret.replace(/\D/g, "");
-  if (d.length !== 14) return siret;
-  return `${d.slice(0, 3)} ${d.slice(3, 6)} ${d.slice(6, 9)} ${d.slice(9)}`;
+function registryDoneLabel(profile: Record<string, unknown>) {
+  if (profile.registry_document_type === "kbis") {
+    return "Kbis détecté — inscription RCS confirmée (BIC).";
+  }
+  if (profile.registry_document_type === "rne_extract") {
+    return "Extrait RNE détecté — inscription RNE confirmée (BNC).";
+  }
+  return "Document de registre enregistré et validé.";
 }
 
-function verificationReady(profile: UserProfile): boolean {
-  if (profile.verification_status !== "verified") return false;
-  if (profile.registry_document_required && !profile.registry_document_uploaded) return false;
-  if (!profile.sirene_document_uploaded) return false;
-  return true;
+function digitsOnly(value: string) {
+  return value.replace(/\D/g, "");
 }
 
-function VerificationPage() {
-  const [tab, setTab] = useState<Tab>("manual");
+function Verification() {
   const [siret, setSiret] = useState("");
-  const [touched, setTouched] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [ocrError, setOcrError] = useState<string | null>(null);
-  const [registryUploadError, setRegistryUploadError] = useState<string | null>(null);
-  const [sireneUploadError, setSireneUploadError] = useState<string | null>(null);
-  const [turnError, setTurnError] = useState<string | null>(null);
-  const [orchestratorResult, setOrchestratorResult] = useState<OrchestratorTurnResponse | null>(null);
-  const [activeTurn, setActiveTurn] = useState<OrchestratorTurnResponse | null>(null);
+  const [companyName, setCompanyName] = useState("");
+  const [state, setState] = useState<OrchestratorResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [booting, setBooting] = useState(true);
   const navigate = useNavigate();
 
-  const digits = siret.replace(/\D/g, "");
-  const digitCount = digits.length;
-  const isValid = digitCount === 9 || digitCount === 14;
-  const showError = touched && !isValid;
+  const digits = digitsOnly(siret);
+  const siretValid = digits.length === 9 || digits.length === 14;
 
-  const profile: UserProfile | null = activeTurn?.profile ?? orchestratorResult?.profile ?? null;
-  const sessionId = (() => {
-    try {
-      return getStoredSessionId() ?? orchestratorResult?.session_id ?? activeTurn?.session_id;
-    } catch {
-      return orchestratorResult?.session_id ?? activeTurn?.session_id ?? null;
+  useEffect(() => {
+    const sid = loadSession("intake");
+    if (!sid) {
+      setBooting(false);
+      return;
     }
-  })();
-
-  const runVerify = async (value: string) => {
-    setLoading(true);
-    setActiveTurn(null);
-    try {
-      const r = await startOrchestrator(value);
-      setOrchestratorResult(r);
-    } catch (error) {
-      console.error(error);
-      setOrchestratorResult(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const advanceVerification = async (answer?: string) => {
-    if (!sessionId) return;
-    setLoading(true);
-    setTurnError(null);
-    try {
-      const turn = await orchestratorTurn(sessionId, answer);
-      setActiveTurn(turn);
-      setOrchestratorResult((prev) => (prev ? { ...prev, profile: turn.profile } : prev));
-
-      if (turn.phase === "profile_questions" && turn.ui_action === "ask_question") {
-        navigate({
-          to: "/onboarding/profil",
-          state: {
-            initialQuestion: turn.message ?? undefined,
-            initialQuickReplies: turn.quick_replies,
-          } as Record<string, unknown>,
-        });
+    void (async () => {
+      try {
+        const detail = await api.sessionDetail(sid);
+        if (detail.phase === "profile_questions") {
+          navigate({ to: "/onboarding/profil", replace: true });
+          return;
+        }
+        if (
+          detail.phase === "verification" ||
+          detail.phase === "verification_registry_document" ||
+          detail.phase === "verification_document"
+        ) {
+          setState(detailAsTurn(detail));
+        }
+      } catch {
+        clearSession("intake");
+      } finally {
+        setBooting(false);
       }
-    } catch (error) {
-      console.error(error);
-      setTurnError(error instanceof Error ? error.message : "Erreur lors de l'étape de vérification.");
-    } finally {
-      setLoading(false);
-    }
-  };
+    })();
+  }, [navigate]);
 
-  const handleRegistryUpload = async (file: File) => {
-    if (!sessionId) return;
-    setLoading(true);
-    setRegistryUploadError(null);
+  function apply(res: OrchestratorResponse, prev: OrchestratorResponse | null) {
+    const profile = (res.profile ?? {}) as Record<string, unknown>;
+    const verified = profile.verification_status === "verified";
+
+    if (!prev && res.ui_action === "show_verification_result") {
+      if (verified) {
+        toast.success("Étape 1 validée — identité registre confirmée.");
+      } else {
+        toast.error(res.message || "Identité non confirmée. Vérifiez le numéro saisi.");
+      }
+    }
+    if (prev?.ui_action === "show_verification_result" && res.ui_action === "upload_registry_document") {
+      toast.success("Étape 1 terminée. Passez à l'étape 2 : document RCS / RNE.");
+    }
+    if (prev?.ui_action === "show_verification_result" && res.ui_action === "upload_sirene_document") {
+      toast.success("Étape 1 terminée. Passez à l'étape 3 : avis SIRENE.");
+    }
+    if (prev?.ui_action === "upload_registry_document" && res.ui_action !== "upload_registry_document") {
+      toast.success("Étape 2 validée — document de registre enregistré.");
+    }
+    if (prev?.ui_action === "upload_sirene_document" && res.ui_action === "ask_question") {
+      toast.success("Étape 3 validée — avis SIRENE archivé. Les questions de profil commencent.");
+    }
+
+    setState(res);
+    saveSession("intake", res.session_id);
+    if (res.ui_action === "ask_question") {
+      navigate({ to: "/onboarding/profil" });
+    }
+  }
+
+  async function run<T extends OrchestratorResponse>(fn: () => Promise<T>) {
+    setBusy(true);
+    setError(null);
     try {
-      await uploadRegistryDocument(sessionId, file);
-      await advanceVerification();
-    } catch (error) {
-      setRegistryUploadError(error instanceof Error ? error.message : "Erreur d'upload.");
+      const res = await fn();
+      apply(res, state);
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Une erreur est survenue.";
+      setError(msg);
+      toast.error(msg);
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
-  };
+  }
 
-  const handleSireneUpload = async (file: File) => {
-    if (!sessionId) return;
-    setLoading(true);
-    setSireneUploadError(null);
+  async function ocr(file: File) {
+    setBusy(true);
     try {
-      await uploadSireneAvis(sessionId, file);
-      await advanceVerification();
-    } catch (error) {
-      setSireneUploadError(error instanceof Error ? error.message : "Erreur d'upload.");
+      const res = await api.ocrSiret(file);
+      if (res.siret) {
+        setSiret(res.siret);
+        toast.success("SIRET détecté sur le document.");
+      } else {
+        toast.error("Aucun SIRET lisible sur ce document.");
+      }
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Lecture du document impossible.");
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
-  };
+  }
 
-  const handleFile = async (file: File) => {
-    setLoading(true);
-    setOcrError(null);
-    try {
-      const extracted = await ocrExtractSiret(file);
-      setSiret(extracted);
-      setTouched(true);
-      setTab("manual");
-    } catch (error) {
-      setOcrError(error instanceof Error ? error.message : "Erreur lors de l'extraction.");
-    } finally {
-      setLoading(false);
-    }
-  };
+  function resetIdentity() {
+    clearSession("intake");
+    setState(null);
+    setError(null);
+  }
 
-  const showRegistryDocStep =
-    profile?.verification_status === "verified" &&
-    profile.registry_document_required &&
-    !profile.registry_document_uploaded;
+  const profile = (state?.profile ?? {}) as Record<string, unknown>;
+  const verified = profile.verification_status === "verified";
+  const registryRequired = Boolean(profile.registry_document_required);
+  const registryDone = Boolean(profile.registry_document_uploaded);
+  const sireneDone = Boolean(profile.sirene_document_uploaded);
+  const hasResult = Boolean(state);
 
-  const showSireneUploadStep =
-    profile?.verification_status === "verified" &&
-    !showRegistryDocStep &&
-    !profile.sirene_document_uploaded;
-
-  const showContinueToProfil = profile && verificationReady(profile);
+  if (booting) {
+    return (
+      <AppShell>
+        <div className="flex min-h-[40vh] items-center justify-center">
+          <Spinner />
+        </div>
+      </AppShell>
+    );
+  }
 
   return (
-    <div className="min-h-screen px-6 py-16 max-w-3xl mx-auto animate-slide-up">
-      <div className="flex items-center justify-between gap-4">
-        <Link to="/onboarding" className="text-xs font-mono uppercase tracking-widest text-ink/40 hover:text-ink">
-          ← Retour
-        </Link>
-        <LogoutBubble />
-      </div>
+    <AppShell>
+      <PageHeader
+        eyebrow="Étape 1 · Parcours avec SIREN"
+        title="Vérifions votre établissement"
+        description="Trois étapes : identité registre, document RCS/RNE si requis, puis avis SIRENE."
+      />
 
-      <div className="mt-8 mb-12">
-        <p className="font-mono text-[11px] uppercase tracking-[0.25em] text-teal-dark mb-4">
-          Étape 02 · Vérification
-        </p>
-        <h1 className="text-4xl md:text-5xl font-extrabold tracking-tighter text-balance">
-          Vérifions votre <span className="italic font-normal">SIREN / SIRET</span>.
-        </h1>
-        <p className="mt-4 text-ink/60 text-lg text-pretty max-w-xl">
-          Identité registre, vérification RCS/RNE et archivage de votre avis SIRENE.
-        </p>
-      </div>
-
-      {!orchestratorResult && (
-        <>
-          <div className="flex gap-1 p-1 bg-white border border-border rounded-full w-fit mb-8">
-            <button
-              onClick={() => setTab("manual")}
-              className={`px-5 py-2 rounded-full text-sm font-semibold transition-colors ${
-                tab === "manual" ? "bg-ink text-background" : "text-ink/60 hover:text-ink"
-              }`}
-            >
-              Saisie manuelle
-            </button>
-            <button
-              onClick={() => setTab("upload")}
-              className={`px-5 py-2 rounded-full text-sm font-semibold transition-colors ${
-                tab === "upload" ? "bg-ink text-background" : "text-ink/60 hover:text-ink"
-              }`}
-            >
-              Uploader un document
-            </button>
-          </div>
-
-          {tab === "manual" && (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                setTouched(true);
-                if (isValid) runVerify(digits);
-              }}
-              className="bg-white border border-border rounded-2xl p-8 space-y-6"
-            >
-              <div>
-                <label className="text-xs font-semibold uppercase tracking-widest text-ink/50">
-                  Numéro SIREN / SIRET
-                </label>
-                <input
-                  value={siret}
-                  onChange={(e) => {
-                    setSiret(e.target.value);
-                    if (!touched && e.target.value.replace(/\D/g, "").length > 0) setTouched(true);
-                  }}
-                  onBlur={() => setTouched(true)}
-                  placeholder="832 174 902 00019"
-                  maxLength={19}
-                  inputMode="numeric"
-                  className="w-full mt-3 px-0 py-3 bg-transparent border-b-2 border-border font-mono text-2xl focus:outline-none focus:border-teal-dark"
-                />
-                {showError && (
-                  <p className="text-xs text-coral mt-2">SIREN (9) ou SIRET (14 chiffres) requis.</p>
-                )}
-              </div>
-              <button
-                type="submit"
-                disabled={loading || !isValid}
-                className="w-full px-8 py-4 bg-ink text-background rounded-xl font-semibold hover:bg-teal-dark transition-colors disabled:opacity-40"
-              >
-                {loading ? "Vérification…" : "Étape 1 — Vérifier mon numéro"}
-              </button>
-            </form>
-          )}
-
-          {tab === "upload" && (
-            <label className="block bg-white border-2 border-dashed border-border hover:border-teal-dark rounded-2xl p-16 text-center cursor-pointer">
-              <input
-                type="file"
-                accept="image/*,application/pdf"
-                className="sr-only"
-                disabled={loading}
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) handleFile(f);
-                }}
-              />
-              <p className="font-semibold">{loading ? "Extraction…" : "Déposez votre justificatif"}</p>
-              {ocrError && <p className="text-sm text-coral mt-2">{ocrError}</p>}
-            </label>
-          )}
-        </>
-      )}
-
-      {orchestratorResult && profile && (
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="space-y-6">
-          <section className="bg-white border border-border rounded-2xl p-8">
-            <p className="font-mono text-[11px] uppercase tracking-widest text-teal-dark mb-4">
-              Étape 1 · Identité registre
-            </p>
-            <dl className="grid grid-cols-2 gap-4 text-sm">
-              <div>
-                <dt className="text-xs uppercase text-ink/40">SIREN</dt>
-                <dd className="font-semibold font-mono">
-                  {profile.siren ? formatSiren(profile.siren) : "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs uppercase text-ink/40">SIRET</dt>
-                <dd className="font-semibold font-mono">
-                  {profile.siret ? formatSiret(profile.siret) : profile.siren ? "(siège)" : "—"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs uppercase text-ink/40">Dénomination</dt>
-                <dd className="font-semibold">{profile.denomination ?? "—"}</dd>
-              </div>
-              <div>
-                <dt className="text-xs uppercase text-ink/40">Forme juridique</dt>
-                <dd className="font-semibold">{profile.legal_form ?? "—"}</dd>
-              </div>
-              <div>
-                <dt className="text-xs uppercase text-ink/40">Code NAF (statistique)</dt>
-                <dd className="font-semibold">{profile.ape_code ?? "—"}</dd>
-              </div>
-              <div>
-                <dt className="text-xs uppercase text-ink/40">Micro-éligible</dt>
-                <dd className="font-semibold">{profile.micro_eligible ? "Oui (EI)" : "—"}</dd>
-              </div>
-              {profile.registry_tax_base && !profile.registry_document_required && (
-                <div className="col-span-2">
-                  <dt className="text-xs uppercase text-ink/40">Base fiscale registre</dt>
-                  <dd className="font-semibold text-teal-dark">{profile.registry_tax_base}</dd>
-                </div>
-              )}
-            </dl>
-            <p className="mt-4 text-sm text-ink/60">{orchestratorResult.message}</p>
-          </section>
+          {!hasResult && (
+            <Card className="animate-rise space-y-5 p-6">
+              <Field
+                label="SIREN ou SIRET"
+                htmlFor="siret"
+                hint="9 chiffres (SIREN) ou 14 chiffres (SIRET), sans espaces."
+                error={
+                  siret && !siretValid
+                    ? "Indiquez un SIREN (9 chiffres) ou un SIRET (14 chiffres)."
+                    : null
+                }
+              >
+                <Input
+                  id="siret"
+                  inputMode="numeric"
+                  value={siret}
+                  onChange={(e) => setSiret(e.target.value.replace(/[^\d\s]/g, ""))}
+                  placeholder="123 456 789 00012"
+                  className="font-mono tracking-wider"
+                />
+              </Field>
+              <Field label="Nom de l'entreprise (optionnel)" htmlFor="company">
+                <Input
+                  id="company"
+                  value={companyName}
+                  onChange={(e) => setCompanyName(e.target.value)}
+                  placeholder="Studio Marge Nord"
+                />
+              </Field>
+              <Button
+                variant="safran"
+                disabled={!siretValid || busy}
+                onClick={() =>
+                  run(() =>
+                    api.start({
+                      siret: digits,
+                      company_name: companyName.trim() || undefined,
+                      branch: "intake",
+                    }),
+                  )
+                }
+              >
+                {busy ? <Spinner /> : <ArrowRight />} Lancer la vérification
+              </Button>
+            </Card>
+          )}
 
-          {profile.verification_status === "verified" && (
-            <section className="bg-white border border-border rounded-2xl p-8">
-              <p className="font-mono text-[11px] uppercase tracking-widest text-teal-dark mb-4">
-                Étape 2 · Vérification RCS / RNE
-              </p>
-              {profile.registry_document_uploaded ? (
-                <p className="text-sm">
-                  {profile.registry_document_type === "kbis"
-                    ? "✓ Kbis détecté — inscription RCS confirmée → BIC"
-                    : "✓ Extrait RNE détecté — inscription RNE seule → BNC"}
-                </p>
-              ) : profile.registry_document_required ? (
+          {error && <ErrorBlock message={error} />}
+
+          {hasResult && (
+            <>
+              {state?.ui_action === "show_verification_result" || !verified ? (
+                <VerificationResult
+                  profile={profile}
+                  message={state?.message}
+                  busy={busy}
+                  onContinue={
+                    verified
+                      ? () => run(() => api.turn({ session_id: state!.session_id }))
+                      : undefined
+                  }
+                  onRetry={!verified ? resetIdentity : undefined}
+                />
+              ) : (
+                <StepDoneCard
+                  step={1}
+                  title="Identité registre confirmée"
+                  detail={String(profile.denomination || profile.siren || "Établissement vérifié")}
+                />
+              )}
+
+              {verified && (
                 <>
-                  <p className="text-sm text-ink/70 mb-4">
-                    Déposez votre Kbis (greffe / RCS) ou votre extrait RNE (INPI). Nous vérifions
-                    automatiquement le type de document et le SIREN.
-                  </p>
-                  <label className="block border-2 border-dashed border-border rounded-xl p-8 text-center cursor-pointer hover:border-teal-dark">
-                    <input
-                      type="file"
-                      accept="application/pdf,image/*"
-                      className="sr-only"
-                      disabled={loading}
-                      onChange={(e) => {
-                        const f = e.target.files?.[0];
-                        if (f) handleRegistryUpload(f);
-                      }}
+                  {registryRequired ? (
+                    registryDone ? (
+                      <StepDoneCard
+                        step={2}
+                        title="Vérification RCS / RNE"
+                        detail={registryDoneLabel(profile)}
+                      />
+                    ) : state?.ui_action === "upload_registry_document" ? (
+                      <UploadCard
+                        title="Étape 2 · Document RCS / RNE"
+                        description={
+                          state.message ??
+                          "Déposez votre Kbis (greffe / RCS) ou votre extrait RNE (INPI). Nous vérifions le type et le SIREN."
+                        }
+                        busy={busy}
+                        onFile={(f) =>
+                          run(() =>
+                            api.afterVerificationUpload(state.session_id, () =>
+                              api.registryDocument(state.session_id, f),
+                            ),
+                          )
+                        }
+                      />
+                    ) : null
+                  ) : state?.ui_action !== "show_verification_result" ? (
+                    <StepDoneCard
+                      step={2}
+                      title="RCS confirmé automatiquement"
+                      detail={String(
+                        profile.registry_tax_base ||
+                          "Inscription RCS détectée — pas de document requis.",
+                      )}
                     />
-                    <span className="text-sm font-semibold">
-                      {loading ? "Analyse…" : "Déposer Kbis ou extrait RNE (PDF)"}
-                    </span>
-                  </label>
-                  {registryUploadError && (
-                    <p className="text-xs text-coral mt-2">{registryUploadError}</p>
+                  ) : null}
+
+                  {(registryDone || !registryRequired) &&
+                    state?.ui_action !== "show_verification_result" &&
+                    (sireneDone ? (
+                      <StepDoneCard
+                        step={3}
+                        title="Avis SIRENE archivé"
+                        detail={String(
+                          profile.sirene_document_activity_label ||
+                            "Document enregistré pour votre dossier.",
+                        )}
+                      />
+                    ) : state?.ui_action === "upload_sirene_document" ? (
+                      <UploadCard
+                        title="Étape 3 · Avis de situation SIRENE"
+                        description={
+                          state.message ??
+                          "Téléchargez votre avis sur avis-situation-sirene.insee.fr puis déposez-le ici."
+                        }
+                        busy={busy}
+                        onFile={(f) =>
+                          run(() =>
+                            api.afterVerificationUpload(state.session_id, () =>
+                              api.sireneAvis(state.session_id, f),
+                            ),
+                          )
+                        }
+                      />
+                    ) : null)}
+
+                  {sireneDone && state?.ui_action === "ask_question" && (
+                    <Card className="animate-rise p-6">
+                      <p className="text-sm text-muted-foreground">
+                        Les trois étapes de vérification sont terminées. Passez aux questions de
+                        profil fiscal.
+                      </p>
+                      <Button
+                        variant="safran"
+                        className="mt-4"
+                        onClick={() => navigate({ to: "/onboarding/profil" })}
+                      >
+                        Continuer vers les questions <ArrowRight />
+                      </Button>
+                    </Card>
                   )}
                 </>
-              ) : (
-                <p className="text-sm text-ink/70">
-                  Société commerciale détectée — inscription RCS confirmée → BIC (pas de document
-                  requis).
-                </p>
               )}
-            </section>
-          )}
-
-          {profile.verification_status === "verified" && !showRegistryDocStep && (
-            <section className="bg-white border border-border rounded-2xl p-8">
-              <p className="font-mono text-[11px] uppercase tracking-widest text-teal-dark mb-4">
-                Étape 3 · Avis de situation SIRENE
-              </p>
-              {profile.sirene_document_uploaded ? (
-                <div className="text-sm space-y-1">
-                  <p>✓ Document archivé</p>
-                  {profile.sirene_document_activity_label && (
-                    <p className="text-ink/60">Activité : {profile.sirene_document_activity_label}</p>
-                  )}
-                </div>
-              ) : (
-                <>
-                  <p className="text-sm text-ink/70 mb-4">
-                    Téléchargez votre avis sur{" "}
-                    <a
-                      href="https://avis-situation-sirene.insee.fr/"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="underline text-teal-dark"
-                    >
-                      avis-situation-sirene.insee.fr
-                    </a>{" "}
-                    puis déposez-le ici.
-                  </p>
-                  <label className="block border-2 border-dashed border-border rounded-xl p-8 text-center cursor-pointer hover:border-teal-dark">
-                    <input
-                      type="file"
-                      accept="application/pdf,image/*"
-                      className="sr-only"
-                      disabled={loading}
-                      onChange={(e) => {
-                        const f = e.target.files?.[0];
-                        if (f) handleSireneUpload(f);
-                      }}
-                    />
-                    <span className="text-sm font-semibold">
-                      {loading ? "Archivage…" : "Déposer l'avis SIRENE (PDF)"}
-                    </span>
-                  </label>
-                  {sireneUploadError && <p className="text-xs text-coral mt-2">{sireneUploadError}</p>}
-                  {turnError && <p className="text-xs text-coral mt-2">{turnError}</p>}
-                </>
-              )}
-            </section>
-          )}
-
-          {profile.verification_status === "verified" && !showRegistryDocStep && !showSireneUploadStep && (
-            <button
-              onClick={() => advanceVerification()}
-              disabled={loading || !showContinueToProfil}
-              className="w-full px-8 py-4 bg-ink text-background rounded-xl font-semibold hover:bg-teal-dark transition-colors disabled:opacity-40"
-            >
-              {loading ? "Chargement…" : "Continuer vers mon profil →"}
-            </button>
-          )}
-
-          {profile.verification_status !== "verified" && (
-            <button
-              onClick={() => setOrchestratorResult(null)}
-              className="w-full px-8 py-4 bg-ink text-background rounded-xl font-semibold"
-            >
-              Réessayer
-            </button>
+            </>
           )}
         </div>
-      )}
-    </div>
+
+        <aside className="space-y-4">
+          {!hasResult && (
+            <UploadCard
+              title="Lire mon SIRET automatiquement"
+              description="Photo ou PDF de votre avis de situation : l'OCR remplit le champ pour vous."
+              busy={busy}
+              ctaLabel="Analyser un document"
+              onFile={ocr}
+            />
+          )}
+          <Card className="p-5">
+            <ScanLine className="size-5 text-accent" />
+            <p className="mt-3 text-sm text-muted-foreground">
+              Chaque étape affiche une confirmation une fois validée. En cas d'échec, le résultat et
+              un bouton « Réessayer » s'affichent sous le formulaire.
+            </p>
+          </Card>
+        </aside>
+      </div>
+    </AppShell>
   );
 }

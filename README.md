@@ -91,7 +91,8 @@ ledgermind-assistant/
 │   │   ├── services/         ← recherche-entreprises, OCR, etc.
 │   │   └── core/             ← Mongo (users + sessions)
 │   └── tests/
-├── frontend/
+├── frontend/                 ← app UI actuelle (LedgerMind fiscal navigator)
+├── oldfront/                 ← ancien frontend (référence / legacy)
 │   ├── package.json
 │   └── src/
 │       ├── routes/           ← file-based TanStack Router routes

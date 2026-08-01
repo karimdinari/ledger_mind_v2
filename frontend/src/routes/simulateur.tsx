@@ -1,5 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { AppShell, PageHeader } from "@/components/lm/AppShell";
+import { useState } from "react";
+import { AppShell, PageHeader } from "@/components/app-shell";
+import { PremiumGate } from "@/components/paywall";
+import { Button, Card, Textarea } from "@/components/ui-kit";
 
 export const Route = createFileRoute("/simulateur")({
   head: () => ({
@@ -10,62 +13,89 @@ export const Route = createFileRoute("/simulateur")({
       { property: "og:description", content: "Simulez l'impact fiscal d'un contrat en langage naturel." },
     ],
   }),
-  component: SimulateurPage,
+  component: Page,
 });
 
-function SimulateurPage() {
+function Page() {
+  return (
+    <PremiumGate
+      feature="simulateur"
+      title="Simulateur fiscal"
+      pitch="Décrivez une situation en français : LedgerMind estime net, provision et impact."
+      benefits={[
+        "Scénarios en langage naturel",
+        "Comparaison avant / après contrat",
+        "Provision fiscale estimée",
+      ]}
+      preview={
+        <Card className="p-8">
+          <p className="text-sm text-muted-foreground">Exemple</p>
+          <p className="mt-2 font-medium">+ Contrat 5 000 € → net ≈ 4 025 €</p>
+        </Card>
+      }
+    >
+      <Simulateur />
+    </PremiumGate>
+  );
+}
+
+const ROWS = [
+  { s: "Actuel", n: "0,00", p: "0,00", i: "—" },
+  { s: "+ Contrat 5 000 €", n: "4 025,00", p: "660,00", i: "+ 4 025 €" },
+  { s: "+ Contrat 15 000 €", n: "12 075,00", p: "1 980,00", i: "+ 12 075 €" },
+];
+
+function Simulateur() {
+  const [scenario, setScenario] = useState(
+    "Si je signe ce contrat de 5000 € avec un client français, combien je garde ?",
+  );
+  const [shown, setShown] = useState(false);
+
   return (
     <AppShell>
       <PageHeader
-        eyebrow="Simulateur"
-        title={
-          <>
-            Et si je signais <span className="italic font-normal">ce contrat ?</span>
-          </>
-        }
-        description="Décrivez la situation en français simple, on vous montre l'impact fiscal, ligne par ligne."
+        eyebrow="Premium · aperçu"
+        title="Et si je signais ce contrat ?"
+        description="Décrivez la situation en français simple. Le moteur de simulation backend n'est pas encore branché — résultats illustratifs."
       />
 
-      <div className="bg-white border border-border rounded-2xl p-8">
-        <label className="text-xs uppercase tracking-widest text-ink/50 font-semibold">
-          Votre situation
-        </label>
-        <textarea
+      <Card className="p-8">
+        <label className="rule-label text-muted-foreground">Votre situation</label>
+        <Textarea
+          className="mt-3"
           rows={4}
-          defaultValue="Si je signe ce contrat de 5000 € avec un client français, combien je garde ?"
-          className="w-full mt-3 px-0 py-3 bg-transparent border-b border-border text-lg focus:outline-none focus:border-ink transition-colors resize-none"
+          value={scenario}
+          onChange={(e) => setScenario(e.target.value)}
         />
-        <button className="mt-6 px-8 py-4 bg-ink text-background rounded-xl font-semibold hover:bg-teal-dark transition-colors">
+        <Button className="mt-6" variant="safran" onClick={() => setShown(true)}>
           Simuler
-        </button>
-      </div>
+        </Button>
+      </Card>
 
-      <div className="mt-10 overflow-hidden bg-white border border-border rounded-2xl">
-        <table className="w-full">
-          <thead className="bg-background">
-            <tr className="text-xs uppercase tracking-widest text-ink/50">
-              <th className="text-left px-6 py-4 font-semibold">Scénario</th>
-              <th className="text-right px-6 py-4 font-semibold">Net perçu</th>
-              <th className="text-right px-6 py-4 font-semibold">Provision</th>
-              <th className="text-right px-6 py-4 font-semibold">Impact</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border font-mono text-sm">
-            {[
-              { s: "Actuel", n: "0,00", p: "0,00", i: "—" },
-              { s: "+ Contrat 5 000 €", n: "4 025,00", p: "660,00", i: "+ 4 025 €" },
-              { s: "+ Contrat 15 000 €", n: "12 075,00", p: "1 980,00", i: "+ 12 075 €" },
-            ].map((r) => (
-              <tr key={r.s} className="hover:bg-background/50">
-                <td className="px-6 py-4 font-sans font-medium">{r.s}</td>
-                <td className="px-6 py-4 text-right">{r.n} €</td>
-                <td className="px-6 py-4 text-right text-amber-fiscal">{r.p} €</td>
-                <td className="px-6 py-4 text-right text-teal-dark">{r.i}</td>
+      {shown && (
+        <Card className="mt-8 overflow-hidden p-0">
+          <table className="w-full">
+            <thead className="bg-secondary/50">
+              <tr className="text-xs uppercase tracking-widest text-muted-foreground">
+                <th className="px-6 py-4 text-left font-semibold">Scénario</th>
+                <th className="px-6 py-4 text-right font-semibold">Net perçu</th>
+                <th className="px-6 py-4 text-right font-semibold">Provision</th>
+                <th className="px-6 py-4 text-right font-semibold">Impact</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody className="divide-y divide-border font-mono text-sm">
+              {ROWS.map((r) => (
+                <tr key={r.s}>
+                  <td className="px-6 py-4 font-sans font-medium">{r.s}</td>
+                  <td className="px-6 py-4 text-right">{r.n} €</td>
+                  <td className="px-6 py-4 text-right">{r.p} €</td>
+                  <td className="px-6 py-4 text-right text-success">{r.i}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
     </AppShell>
   );
 }
