@@ -8,6 +8,8 @@ import {
   ShieldCheck,
   Instagram,
   Youtube,
+  Calculator,
+  Euro,
 } from "lucide-react";
 import { MarketingLayout } from "@/components/marketing";
 import { HeroVideo } from "@/components/hero-video";
@@ -18,6 +20,64 @@ function TikTokIcon({ className }: { className?: string }) {
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden className={className}>
       <path d="M16.6 5.82A4.28 4.28 0 0 1 15.54 3h-3.09v12.4a2.59 2.59 0 1 1-1.84-2.48V9.77a5.7 5.7 0 1 0 4.93 5.64V9.01a7.35 7.35 0 0 0 4.3 1.38V7.3a4.29 4.29 0 0 1-3.24-1.48Z" />
     </svg>
+  );
+}
+
+function HeroBackdrop() {
+  return (
+    <div className="pointer-events-none absolute inset-0 z-0 overflow-hidden" aria-hidden>
+      {/* Subtle dot grain on the deep ink */}
+      <div
+        className="absolute inset-0 opacity-[0.05]"
+        style={{
+          backgroundImage:
+            "radial-gradient(circle at 1px 1px, var(--ink-foreground) 1px, transparent 0)",
+          backgroundSize: "22px 22px",
+        }}
+      />
+
+      {/* Large parchment ledger shape on the right */}
+      <div
+        className="absolute -top-[10%] -right-[10%] hidden h-[130%] w-[72%] rotate-3 skew-x-[-6deg] rounded-[80px] bg-background opacity-95 shadow-[0_0_100px_rgba(0,0,0,0.45)] lg:block"
+        style={{ backgroundColor: "var(--background)" }}
+      >
+        {/* Parchment texture lines */}
+        <div
+          className="absolute inset-0 opacity-[0.05]"
+          style={{
+            backgroundImage:
+              "repeating-linear-gradient(0deg, transparent, transparent 2px, var(--primary) 2px, var(--primary) 3px)",
+            backgroundSize: "100% 4px",
+          }}
+        />
+        {/* Cold cyan data veins */}
+        <svg
+          className="absolute inset-0 h-full w-full opacity-[0.14]"
+          viewBox="0 0 1000 1000"
+          preserveAspectRatio="none"
+        >
+          <line x1="800" y1="0" x2="800" y2="1000" stroke="var(--info)" strokeWidth="1" />
+          <line x1="0" y1="200" x2="1000" y2="200" stroke="var(--info)" strokeWidth="1" />
+          <circle cx="800" cy="200" r="8" fill="var(--info)" />
+          <line x1="750" y1="0" x2="750" y2="1000" stroke="var(--info)" strokeWidth="0.5" />
+          <line x1="0" y1="250" x2="1000" y2="250" stroke="var(--info)" strokeWidth="0.5" />
+          <line x1="0" y1="450" x2="1000" y2="450" stroke="var(--info)" strokeWidth="0.5" />
+          <circle cx="750" cy="250" r="5" fill="var(--info)" />
+        </svg>
+      </div>
+
+      {/* Deep ink blots */}
+      <div className="absolute -left-[10%] -top-[20%] size-[800px] rounded-full bg-ink blur-[150px] opacity-80" />
+      <div className="absolute bottom-[-10%] left-[5%] size-[420px] rounded-full bg-accent blur-[180px] opacity-[0.12]" />
+
+      {/* Giant fiscal watermark icons on the ink side */}
+      <Euro className="absolute left-[6%] top-[28%] size-40 -rotate-12 text-ink-foreground/[0.05]" />
+      <Receipt className="absolute bottom-[18%] left-[10%] size-36 rotate-6 text-ink-foreground/[0.05]" />
+      <Calculator className="absolute left-[2%] bottom-[38%] size-32 -rotate-12 text-ink-foreground/[0.05]" />
+
+      {/* Ink scrim over the left half so the hero text stays readable above the parchment */}
+      <div className="absolute inset-0 bg-gradient-to-r from-ink via-ink/80 to-transparent lg:via-ink/55" />
+    </div>
   );
 }
 
@@ -43,25 +103,25 @@ export const Route = createFileRoute("/")({
 function Landing() {
   return (
     <MarketingLayout>
-      {/* ---------- Hero ---------- */}
-      <section className="relative overflow-hidden">
-        <div className="surface-grain absolute inset-0 opacity-70" aria-hidden />
+      {/* ---------- Hero : encre & parchemin ---------- */}
+      <section className="relative overflow-hidden bg-ink">
+        <HeroBackdrop />
 
-        <div className="relative mx-auto grid max-w-6xl items-center gap-12 px-5 pb-20 pt-14 sm:pt-20 lg:grid-cols-[1.05fr_400px]">
+        <div className="relative z-10 mx-auto grid max-w-6xl items-center gap-12 px-5 pb-24 pt-20 sm:pt-28 lg:grid-cols-[1.05fr_400px]">
           <div className="animate-rise">
-            <h1 className="text-[clamp(2.4rem,6vw,4.5rem)] leading-[0.95]">
+            <h1 className="text-[clamp(2.4rem,6vw,4.5rem)] leading-[0.95] text-ink-foreground">
               Votre fiscalité,
               <br />
               <span className="italic text-safran">enfin lisible.</span>
             </h1>
-            <p className="mt-7 max-w-xl text-lg leading-relaxed text-muted-foreground">
+            <p className="mt-7 max-w-xl text-lg leading-relaxed text-ink-foreground/70">
               Vous filmez, vous publiez, vous encaissez. LedgerMind s'occupe du reste : réponses
               sourcées, immatriculation, feuille de route, factures et expert-comptable.
             </p>
 
             {/* Plateformes */}
             <div className="mt-8 flex flex-wrap items-center gap-3">
-              <span className="rule-label text-muted-foreground">Vos revenus</span>
+              <span className="rule-label text-ink-foreground/60">Vos revenus</span>
               {[
                 { Icon: TikTokIcon, label: "TikTok" },
                 { Icon: Instagram, label: "Instagram" },
@@ -69,7 +129,7 @@ function Landing() {
               ].map(({ Icon, label }) => (
                 <span
                   key={label}
-                  className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3.5 py-1.5 text-sm font-semibold shadow-soft"
+                  className="inline-flex items-center gap-2 rounded-full border border-ink-foreground/10 bg-ink-foreground/[0.06] px-3.5 py-1.5 text-sm font-semibold text-ink-foreground shadow-soft backdrop-blur-sm"
                 >
                   <Icon className="size-4 text-accent" />
                   {label}
@@ -81,11 +141,11 @@ function Landing() {
               <ButtonLink to="/education" variant="safran" size="lg">
                 Poser une question <ArrowRight />
               </ButtonLink>
-              <ButtonLink to="/abonnement" variant="outline" size="lg">
+              <ButtonLink to="/abonnement" variant="onInk" size="lg">
                 Voir l'offre Premium
               </ButtonLink>
             </div>
-            <p className="mt-6 flex items-center gap-2 text-sm text-muted-foreground">
+            <p className="mt-6 flex items-center gap-2 text-sm text-ink-foreground/60">
               <ShieldCheck className="size-4 text-success" />
               Éducation ouverte sans compte · Premium pour agir
             </p>
@@ -93,7 +153,10 @@ function Landing() {
 
           {/* Téléphone — petite vidéo créatrice */}
           <div className="animate-rise relative mx-auto w-[260px] sm:w-[300px]">
-            <div className="absolute -inset-6 -z-10 rounded-[3rem] bg-gradient-to-br from-accent/25 to-transparent blur-2xl" aria-hidden />
+            <div
+              className="absolute -inset-6 -z-10 rounded-[3rem] bg-gradient-to-br from-accent/30 to-info/20 blur-2xl"
+              aria-hidden
+            />
             <div className="relative aspect-[9/16] overflow-hidden rounded-[2.2rem] border-[6px] border-ink bg-ink shadow-lift">
               <HeroVideo className="absolute inset-0 size-full object-cover" />
               <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center justify-between p-3 text-[11px] font-semibold text-ink-foreground">
@@ -108,13 +171,19 @@ function Landing() {
               </div>
             </div>
 
-            {/* Pastille fiscale */}
-            <div className="animate-seal absolute -left-6 bottom-16 hidden rounded-2xl border border-border bg-card p-3 shadow-lift sm:block">
-              <p className="rule-label text-muted-foreground">TVA</p>
-              <p className="text-sm font-semibold">Seuil non atteint</p>
+            {/* Floating fiscal widgets */}
+            <div className="animate-seal absolute -left-16 bottom-24 hidden rounded-2xl border border-border bg-card p-4 shadow-lift sm:block">
+              <p className="rule-label text-muted-foreground">TVA estimée</p>
+              <p className="text-xl font-semibold text-foreground">206,67 €</p>
+              <div className="mt-2 h-1.5 w-28 overflow-hidden rounded-full bg-muted">
+                <div className="h-full w-3/4 bg-info" />
+              </div>
             </div>
           </div>
         </div>
+
+        {/* Soft blend into the light page below */}
+        <div className="absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-background to-transparent" aria-hidden />
       </section>
 
       {/* ---------- Free vs Premium ---------- */}
