@@ -1,0 +1,83 @@
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      AUTH_SECRET: ${AUTH_SECRET:-ledgermind-dev-secret-change-me-32b}
+      AUTH_TOKEN_DAYS: ${AUTH_TOKEN_DAYS:-14}
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DB_NAME: ${MONGO_DB_NAME:-ledgermind}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+      PEDAGOGUE_EMBEDDINGS_PROVIDER: mistral
+      PEDAGOGUE_CHROMA_DIR: /data/chroma
+      PISTE_CLIENT_ID: ${PISTE_CLIENT_ID:-}
+      PISTE_CLIENT_SECRET: ${PISTE_CLIENT_SECRET:-}
+    volumes:
+      - pedagogue_chroma:/data/chroma
+    ports:
+      - "8000:8000"
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8000}
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Optional: seed pedagogue RAG corpus (one-shot)
+  #   docker compose --profile seed run --rm seed-corpus
+  seed-corpus:
+    profiles: ["seed"]
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-changeme}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      MONGO_URI: mongodb://mongo:27017
+      PEDAGOGUE_EMBEDDINGS_PROVIDER: mistral
+      PEDAGOGUE_CHROMA_DIR: /data/chroma
+    volumes:
+      - pedagogue_chroma:/data/chroma
+    depends_on:
+      backend:
+        condition: service_healthy
+    command: ["python", "-m", "scripts.seed_pedagogue_corpus"]
+
+volumes:
+  mongo_data:
+  pedagogue_chroma:

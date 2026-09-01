@@ -1,0 +1,72 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Environment & secrets ──────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Database & runtime state ───────────────────────────────────────────────────
+sessions.db
+backend/sessions.db
+backend/data/mcp_web_state.json
+# Chroma vector DB — runtime data, rebuilt by seed scripts, never versioned.
+**/data/chroma/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+
+# ── Media assets — videos & large images (served via CDN/hosting, not git) ────
+frontend/src/assets/*.mp4
+frontend/src/assets/*.jpg
+frontend/src/assets/*.jpeg
+frontend/src/assets/*.png
+frontend/src/assets/*.webp
+frontend/public/invoice-templates/*.webp
+frontend/public/*.mp4
+frontend/public/*.jpg
+docs/banner.jpg
+
+# ── Frontend (Node / Bun) ──────────────────────────────────────────────────────
+node_modules/
+dist/
+.output/
+.vinxi/
+.tanstack/
+.nitro/
+*.local
+package-lock.json
+
+# ── Certificates — private keys and generated certs stay local ───────────────
+backend/certs/*.key
+backend/certs/*.pem
+backend/certs/*.csr
+backend/certs/*.srl
+backend/certs/*.p12
+backend/certs/*.pfx
+backend/certs/*.crt
+# Exception: the CA cert is a public trust anchor for C2PA signature verification.
+!backend/certs/c2pa-ca.crt
+
+# ── OS & editors ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# ── Internal / legacy — never versioned in this repo ──────────────────────────
+ledger_mind_v2/
+docs-test/
+/karim
